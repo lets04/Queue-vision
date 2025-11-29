@@ -1,0 +1,476 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0a0a0a;
+  color: #ffffff;
+  line-height: 2.6;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* HEADER */
+.header {
+  background: linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%);
+  border-bottom: 2px solid #222222;
+  padding: 1rem 2rem;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.header-content {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.header-left h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: #ffffff;
+  margin-bottom: 0.5rem;
+}
+
+.subtitle {
+  color: #9ca3af;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+}
+
+/* Admin Button */
+.admin-button {
+  padding: 1rem 2rem;
+  background: #c7d6ed4c;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 1.1rem;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.admin-button:hover {
+  background: #2563eb;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
+/* Status Indicator */
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.5rem;
+  background: #111111;
+  border: 1px solid #222222;
+  border-radius: 8px;
+}
+
+.status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+.status-indicator.online .status-dot {
+  background: #22c55e;
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.5);
+}
+
+.status-indicator.offline .status-dot {
+  background: #ef4444;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+  animation: none;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(0.95); }
+}
+
+.status-indicator span {
+  color: #9ca3af;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.last-update {
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+/* MAIN CONTENT */
+
+.main-content {
+  flex: 1;
+  margin: 0;
+  padding: 2rem 2rem;
+  width: 100%;
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3rem;
+}
+
+.section-title {
+  font-size: 2.25rem;
+  font-weight: 700;
+  color: #ffffff;
+  margin-bottom: 2.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 3px solid #222222;
+}
+
+/* CAMERAS SECTION */
+
+.cameras-section {
+  margin-bottom: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Grid para 2 cámaras lado a lado */
+.cameras-grid,
+.cameras-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2rem;
+  width: 100%;
+}
+
+.camera-container {
+  background: #111111;
+  border: 1px solid #222222;
+  border-radius: 16px;
+  padding: 2rem;
+  transition: all 0.3s;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.camera-container:hover {
+  border-color: #3b82f6;
+  transform: translateY(-4px);
+  box-shadow: 0 8px 16px rgba(59, 130, 246, 0.2);
+}
+
+.camera-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.camera-header h3 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.camera-status {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.camera-status.online {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
+  border: 1px solid #22c55e;
+}
+
+.camera-status.offline {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border: 1px solid #ef4444;
+}
+
+.camera-frame {
+  background: #000000;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-height: 365px;
+  aspect-ratio: 16/9;
+}
+
+.camera-info {
+  margin-top: 1rem;
+  color: #6b7280;
+  font-size: 1rem;
+  font-family: 'Courier New', monospace;
+}
+
+.no-cameras {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 6rem 2rem;
+  background: #111111;
+  border: 1px dashed #333333;
+  border-radius: 16px;
+  color: #6b7280;
+  font-size: 1.25rem;
+}
+
+/* QUEUE SECTION */
+
+.queue-section {
+  margin-bottom: 0;
+}
+
+.queue-info {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 3rem;
+  margin-bottom: 3rem;
+}
+
+.queue-card {
+  background: linear-gradient(135deg, #1a1a1a 0%, #111111 100%);
+  border: 1px solid #222222;
+  border-radius: 16px;
+  padding: 4rem;
+  text-align: center;
+  transition: all 0.5s;
+  position: relative;
+  overflow: hidden;
+}
+
+.queue-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+}
+
+.queue-card:hover {
+  transform: translateY(-8px);
+  box-shadow: 0 12px 24px rgba(59, 130, 246, 0.3);
+  border-color: #3b82f6;
+}
+
+.queue-number {
+  font-size: 7rem;
+  font-weight: 900;
+  color: #ffffff;
+  margin-bottom: 1.5rem;
+  font-family: 'Courier New', monospace;
+  text-shadow: 0 2px 10px rgba(59, 130, 246, 0.3);
+}
+
+.queue-label {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* Ranking Section */
+.ranking-section {
+  background: #111111;
+  border: 1px solid #222222;
+  border-radius: 16px;
+  padding: 2rem;
+}
+
+.ranking-title {
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: #ffffff;
+  margin: 0 0 2rem 0;
+  padding-bottom: 1rem;
+  border-bottom: 2px solid #222222;
+}
+
+.ranking-table {
+  overflow-x: auto;
+  display: block;
+}
+
+.ranking-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ranking-table thead {
+  background: #1a1a1a;
+}
+
+.ranking-table th {
+  padding: 1.25rem 2rem;
+  text-align: left;
+  color: #9ca3af;
+  font-weight: 600;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid #222222;
+}
+
+.ranking-table td {
+  padding: 1.25rem 2rem;
+  color: #ffffff;
+  font-size: 1rem;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.ranking-table tr:last-child td {
+  border-bottom: none;
+}
+
+.ranking-table tr:hover {
+  background: #0a0a0a;
+}
+
+.ranking-table .posicion {
+  font-weight: 700;
+  color: #3b82f6;
+  font-size: 1.25rem;
+}
+
+.ranking-table .id {
+  font-family: 'Courier New', monospace;
+}
+
+.tiempo-badge {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-family: 'Courier New', monospace;
+  display: inline-block;
+  font-size: 1rem;
+}
+
+.badge {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: inline-block;
+}
+
+.badge-atencion {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
+  border: 1px solid #22c55e;
+}
+
+.badge-espera {
+  background: rgba(251, 191, 36, 0.1);
+  color: #fbbf24;
+  border: 1px solid #fbbf24;
+}
+
+.no-ranking {
+  text-align: center;
+  padding: 3rem;
+  color: #6b7280;
+  font-size: 1.1rem;
+}
+
+/* SCHEDULE SECTION */
+
+.schedule-section {
+  margin-bottom: 0;
+}
+
+.schedule-card {
+  background: linear-gradient(135deg, #1a1a1a 0%, #111111 100%);
+  border: 1px solid #222222;
+  border-radius: 16px;
+  padding: 4rem;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.schedule-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4rem;
+  margin-bottom: 2.5rem;
+}
+
+.schedule-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.schedule-label {
+  color: #9ca3af;
+  font-size: 1rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.schedule-time {
+  font-size: 3.5rem;
+  font-weight: 900;
+  color: #ffffff;
+  font-family: 'Courier New', monospace;
+  text-shadow: 0 2px 10px rgba(59, 130, 246, 0.3);
+}
+
+.schedule-separator {
+  font-size: 3.5rem;
+  font-weight: 700;
+  color: #444444;
+}
+
+.schedule-info {
+  text-align: center;
+  padding: 1.25rem;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid #3b82f6;
+  border-radius: 8px;
+  color: #3b82f6;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+/* FOOTER */
+
+.footer {
+  background: #111111;
+  border-top: 1px solid #222222;
+  padding: 1rem;
+  text-align: center;
+  color: #6b7280;
+  font-size: 0.875rem;
+}
