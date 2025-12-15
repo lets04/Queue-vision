@@ -1,12 +1,13 @@
 from fastapi import FastAPI, UploadFile, File, Form, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
-import threading
+from typing import List, Optional
+import asyncio
 import time
 from datetime import datetime
 import uvicorn
+from collections import defaultdict
 
 app = FastAPI()
 
@@ -20,39 +21,41 @@ app.add_middleware(
 )
 
 # CONFIGURACIÓN
+
 configuracion = {
     "hora_apertura": "08:00",
     "hora_cierre": "18:00",
     "tiempo_atencion_min": 3,
+    "segunda_ventanilla_activa": False,  
+    "persona_corte_segunda_ventanilla": 0 
 }
 
-# SEGMENTOS (cada cámara es un segmento de la fila)
-_segmentos = {}  # segmento_num -> {camera_id, personas_count, personas, timestamp}
-_segmentos_lock = threading.Lock()
-
-# FRAMES DE CÁMARAS
+# USAR DICCIONARIOS THREAD-SAFE 
+_segmentos = {}
 _frames = {}
-_frames_lock = threading.Lock()
 _camera_last_seen = {}
-
-# ESTADÍSTICAS
 _estadisticas = {
     'fecha': datetime.now().strftime('%Y-%m-%d'),
     'personas_atendidas': 0,
     'tiempo_promedio_espera': 0,
     'pico_fila': 0,
+    'tiempos_espera_acumulados': []
 }
-_stats_lock = threading.Lock()
-
-# RANKING
 _queue_ranking = {}
-_ranking_lock = threading.Lock()
+_personas_historico = {}
+_ultimo_reseteo = datetime.now()
+_alerta_ventanilla_mostrada = False  
+
+# LOCK PARA OPERACIONES CRÍTICAS
+_global_lock = asyncio.Lock()
 
 
 # MODELOS
+
 class PersonaSegmento(BaseModel):
     local_pos: int
     centro_y: float
+    confianza: Optional[float] = 1.0
 
 class DatosSegmento(BaseModel):
     camera_id: str
@@ -69,36 +72,44 @@ class DatoCamara(BaseModel):
     max_fila: int = 0
 
 
+# ENDPOINTS - DATOS
+
 @app.get("/")
-def home():
-    return {"mensaje": "API Sistema de Filas - Multi-Cámara"}
+async def home():
+    return {"mensaje": "API Sistema de Filas - Multi-Cámara (Optimizado)"}
 
 
-# RECIBIR DATOS DE UN SEGMENTO
 @app.post("/segmento-fila")
-def recibir_segmento(datos: DatosSegmento):
-    with _segmentos_lock:
-        _segmentos[datos.segmento] = {
-            "camera_id": datos.camera_id,
-            "personas_count": datos.personas_count,
-            "personas": [p.dict() for p in datos.personas],
-            "timestamp": datos.timestamp,
-            "last_update": time.time()
-        }
+async def recibir_segmento(datos: DatosSegmento):
+    
+    # Actualizar segmento 
+    _segmentos[datos.segmento] = {
+        "camera_id": datos.camera_id,
+        "personas_count": datos.personas_count,
+        "personas": [p.dict() for p in datos.personas],
+        "timestamp": datos.timestamp,
+        "last_update": time.time()
+    }
     
     # Actualizar pico
     total = _calcular_total_personas()
-    with _stats_lock:
-        if total > _estadisticas['pico_fila']:
-            _estadisticas['pico_fila'] = total
+    if total > _estadisticas['pico_fila']:
+        _estadisticas['pico_fila'] = total
     
-    print(f"Segmento {datos.segmento} ({datos.camera_id}): {datos.personas_count} personas")
-    return {"status": "ok", "segmento": datos.segmento}
+    asyncio.create_task(_actualizar_tracking_personas())
+    
+    # Print asíncrono 
+    asyncio.create_task(_log_async(
+        f"Segmento {datos.segmento} ({datos.camera_id}): {datos.personas_count} personas"
+    ))
+    
+    # Response inmediata 
+    return Response(status_code=202)
 
 
-# COMPATIBILIDAD CON DETECTOR ORIGINAL 
 @app.post("/actualizar-fila")
-def actualizar_fila(dato: DatoCamara):
+async def actualizar_fila(dato: DatoCamara):
+    """Compatibilidad con detector original"""
     datos_seg = DatosSegmento(
         camera_id="cam_default",
         segmento=1,
@@ -106,33 +117,84 @@ def actualizar_fila(dato: DatoCamara):
         personas=[],
         timestamp=time.time()
     )
-    return recibir_segmento(datos_seg)
+    return await recibir_segmento(datos_seg)
 
 
 def _calcular_total_personas():
-    """Suma personas de todos los segmentos activos"""
-    with _segmentos_lock:
-        ahora = time.time()
-        total = 0
-        for datos in _segmentos.values():
-            if ahora - datos.get('last_update', 0) < 10:
-                total += datos['personas_count']
-        return total
+    ahora = time.time()
+    total = 0
+    for datos in _segmentos.values():
+        if ahora - datos.get('last_update', 0) < 10:
+            total += datos['personas_count']
+    return total
 
 
-# ESTADO UNIFICADO (suma de todos los segmentos)
-@app.get("/estado-actual")
-def obtener_estado():
-    with _segmentos_lock:
-        ahora = time.time()
-        segmentos_activos = {}
-        
-        for seg_num, datos in _segmentos.items():
-            if ahora - datos.get('last_update', 0) < 10:
-                segmentos_activos[seg_num] = datos
-        
-        total_personas = sum(s['personas_count'] for s in segmentos_activos.values())
+# Sistema automático de detección de personas atendidas
+async def _actualizar_tracking_personas():
+
+    global _personas_historico, _estadisticas
     
+    await _verificar_reseteo_diario()
+    
+    ahora = time.time()
+    personas_actuales = {}
+    
+    # Obtener todas las personas actuales en fila
+    for seg_num, datos in _segmentos.items():
+        if ahora - datos.get('last_update', 0) < 10:
+            for persona in datos['personas']:
+                # Usar combinación de segmento + posición como ID único
+                persona_id = f"{datos['camera_id']}_seg{seg_num}_pos{persona['local_pos']}"
+                personas_actuales[persona_id] = {
+                    'camera_id': datos['camera_id'],
+                    'segmento': seg_num,
+                    'posicion': persona['local_pos'],
+                    'timestamp': ahora,
+                    'centro_y': persona['centro_y']
+                }
+    
+    # Registrar nuevas personas
+    for pid, info in personas_actuales.items():
+        if pid not in _personas_historico:
+            _personas_historico[pid] = {
+                'entrada': ahora,
+                'info': info
+            }
+    
+    # Detectar personas que salieron 
+    personas_atendidas = []
+    for pid, data in list(_personas_historico.items()):
+        if pid not in personas_actuales:
+            # Esta persona ya no está en la fila
+            tiempo_espera = ahora - data['entrada']
+            tiempo_espera_min = tiempo_espera / 60
+            
+            # Solo contar si estuvo al menos 30 segundos 
+            if tiempo_espera > 30:
+                personas_atendidas.append(tiempo_espera_min)
+                await _log_async(f"✓ Persona atendida: {tiempo_espera_min:.1f} min de espera")
+            
+            # Eliminar del histórico
+            del _personas_historico[pid]
+    
+    if personas_atendidas:
+        _estadisticas['personas_atendidas'] += len(personas_atendidas)
+        _estadisticas['tiempos_espera_acumulados'].extend(personas_atendidas)
+        
+        if _estadisticas['tiempos_espera_acumulados']:
+            _estadisticas['tiempo_promedio_espera'] = sum(_estadisticas['tiempos_espera_acumulados']) / len(_estadisticas['tiempos_espera_acumulados'])
+
+
+@app.get("/estado-actual")
+async def obtener_estado():
+    ahora = time.time()
+    segmentos_activos = {}
+    
+    for seg_num, datos in _segmentos.items():
+        if ahora - datos.get('last_update', 0) < 10:
+            segmentos_activos[seg_num] = datos
+    
+    total_personas = sum(s['personas_count'] for s in segmentos_activos.values())
     tiempo_espera = total_personas * configuracion['tiempo_atencion_min']
     
     return {
@@ -147,55 +209,151 @@ def obtener_estado():
     }
 
 
-# FILA COMPLETA CON POSICIONES GLOBALES
 @app.get("/fila-completa")
-def obtener_fila_completa():
-    with _segmentos_lock:
-        ahora = time.time()
-        segmentos_activos = {}
-        
-        for seg_num, datos in _segmentos.items():
-            if ahora - datos.get('last_update', 0) < 10:
-                segmentos_activos[seg_num] = datos
-        
-        fila_global = []
-        offset = 0
-        
-        for seg_num in sorted(segmentos_activos.keys()):
-            datos = segmentos_activos[seg_num]
-            for persona in datos['personas']:
-                posicion_global = offset + persona['local_pos']
-                fila_global.append({
-                    'id': posicion_global,
-                    'posicion': posicion_global - 1,
-                    'segmento': seg_num,
-                    'camera_id': datos['camera_id'],
-                    'tiempo_espera_min': (posicion_global - 1) * configuracion['tiempo_atencion_min']
-                })
-            offset += datos['personas_count']
+async def obtener_fila_completa():
+    ahora = time.time()
+    segmentos_activos = {}
+    
+    for seg_num, datos in _segmentos.items():
+        if ahora - datos.get('last_update', 0) < 10:
+            segmentos_activos[seg_num] = datos
+    
+    fila_global = []
+    offset = 0
+    
+    for seg_num in sorted(segmentos_activos.keys()):
+        datos = segmentos_activos[seg_num]
+        for persona in datos['personas']:
+            posicion_global = offset + persona['local_pos']
+            fila_global.append({
+                'id': posicion_global,
+                'posicion': posicion_global - 1,
+                'segmento': seg_num,
+                'camera_id': datos['camera_id'],
+                'tiempo_espera_min': (posicion_global - 1) * configuracion['tiempo_atencion_min'],
+                'confianza': persona.get('confianza', 1.0)
+            })
+        offset += datos['personas_count']
     
     return {"total": len(fila_global), "personas": fila_global}
 
 
-# RANKING (compatible con frontend)
+@app.get("/segmentos")
+async def listar_segmentos():
+    ahora = time.time()
+    resultado = []
+    
+    for seg_num, datos in _segmentos.items():
+        activo = ahora - datos.get('last_update', 0) < 10
+        resultado.append({
+            "segmento": seg_num,
+            "camera_id": datos['camera_id'],
+            "personas": datos['personas_count'],
+            "activo": activo
+        })
+    
+    resultado.sort(key=lambda x: x['segmento'])
+    return {"segmentos": resultado}
+
+
+# ENDPOINTS - FRAMES 
+
+@app.post("/upload-frame")
+async def upload_frame(request: Request):
+    
+    try:
+        form = await request.form()
+        camera_id = form.get('camera_id') or form.get('cameraId') or 'default'
+        
+        file_field = form.get('frame') or form.get('file')
+        
+        if file_field and hasattr(file_field, 'read'):
+            contents = await file_field.read()
+        else:
+            contents = file_field if file_field else b''
+        
+        if len(contents) > 0:
+            _frames[camera_id] = contents
+            _camera_last_seen[camera_id] = time.time()
+
+        return Response(status_code=202)  
+        
+    except Exception as e:
+        return Response(status_code=400)
+
+
+@app.get('/stream/{camera_id}.mjpg')
+async def mjpeg_stream(camera_id: str):
+    
+    async def gen():
+        """Generador asíncrono de frames"""
+        last_frame = None
+        no_frame_count = 0
+        
+        while True:
+            frame = _frames.get(camera_id)
+            
+            if frame and frame != last_frame:
+                last_frame = frame
+                no_frame_count = 0
+                
+                yield b'--frame\r\n'
+                yield b'Content-Type: image/jpeg\r\n'
+                yield f'Content-Length: {len(frame)}\r\n\r\n'.encode()
+                yield frame
+                yield b'\r\n'
+            
+            elif no_frame_count > 10 and last_frame:
+                yield b'--frame\r\n'
+                yield b'Content-Type: image/jpeg\r\n'
+                yield f'Content-Length: {len(last_frame)}\r\n\r\n'.encode()
+                yield last_frame
+                yield b'\r\n'
+                no_frame_count = 0
+            else:
+                no_frame_count += 1
+            
+            await asyncio.sleep(0.033)  
+    
+    return StreamingResponse(
+        gen(),
+        media_type='multipart/x-mixed-replace; boundary=frame'
+    )
+
+
+@app.get('/cameras')
+async def list_cameras():
+    ahora = time.time()
+    cameras = [
+        {
+            "camera_id": cam,
+            "activo": ahora - _camera_last_seen.get(cam, 0) < 5,
+            "last_seen": _camera_last_seen.get(cam),
+            "ultimo_frame": f"{(ahora - _camera_last_seen.get(cam, 0)):.1f}s ago"
+        }
+        for cam in _frames.keys()
+    ]
+    return {"cameras": cameras, "total": len(cameras)}
+
+
+# ENDPOINTS - RANKING
+
 @app.post("/queue-ranking")
 async def recibir_ranking(data: dict):
     try:
         camera_id = data.get('camera_id', 'default')
         personas = data.get('personas', [])
         
-        with _ranking_lock:
-            _queue_ranking[camera_id] = personas
+        _queue_ranking[camera_id] = personas
         
-        return {"status": "ok", "count": len(personas)}
+        return Response(status_code=202)
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 @app.get("/queue-ranking")
-def obtener_ranking(camera_id: str = None):
-    # Primero intentar desde fila-completa (multi-cámara)
-    fila = obtener_fila_completa()
+async def obtener_ranking(camera_id: Optional[str] = None):
+    fila = await obtener_fila_completa()
     
     if fila['total'] > 0:
         if camera_id:
@@ -204,40 +362,47 @@ def obtener_ranking(camera_id: str = None):
             personas = fila['personas']
         return {"camera_id": camera_id or "global", "personas": personas, "total": len(personas)}
     
-    # Fallback al ranking tradicional
-    with _ranking_lock:
-        if not camera_id:
-            camera_id = list(_queue_ranking.keys())[0] if _queue_ranking else None
-        ranking = _queue_ranking.get(camera_id, [])
+    if not camera_id:
+        camera_id = list(_queue_ranking.keys())[0] if _queue_ranking else None
+    ranking = _queue_ranking.get(camera_id, [])
     
     return {"camera_id": camera_id, "personas": ranking, "total": len(ranking)}
 
 
-# LISTAR SEGMENTOS/CÁMARAS
-@app.get("/segmentos")
-def listar_segmentos():
-    with _segmentos_lock:
-        ahora = time.time()
-        resultado = []
-        
-        for seg_num, datos in _segmentos.items():
-            activo = ahora - datos.get('last_update', 0) < 10
-            resultado.append({
-                "segmento": seg_num,
-                "camera_id": datos['camera_id'],
-                "personas": datos['personas_count'],
-                "activo": activo
-            })
-        
-        resultado.sort(key=lambda x: x['segmento'])
+# Endpoint manual para atender persona
+@app.post("/atender-persona")
+async def atender_persona_manual(data: dict):
+    """
+    Endpoint manual para registrar una persona atendida
+    Útil si quieres un botón en el frontend
+    """
+    global _estadisticas
     
-    return {"segmentos": resultado}
+    tiempo_espera = data.get('tiempo_espera_min', configuracion['tiempo_atencion_min'])
+    
+    _estadisticas['personas_atendidas'] += 1
+    _estadisticas['tiempos_espera_acumulados'].append(tiempo_espera)
+    
+    # Recalcular promedio
+    if _estadisticas['tiempos_espera_acumulados']:
+        _estadisticas['tiempo_promedio_espera'] = sum(_estadisticas['tiempos_espera_acumulados']) / len(_estadisticas['tiempos_espera_acumulados'])
+    
+    await _log_async(f"✓ Persona atendida manualmente: {tiempo_espera} min")
+    
+    return {
+        "status": "ok",
+        "personas_atendidas": _estadisticas['personas_atendidas'],
+        "tiempo_promedio": round(_estadisticas['tiempo_promedio_espera'], 2)
+    }
 
 
-# CONFIGURACIÓN
+# ENDPOINTS - CONFIGURACIÓN
+
 @app.get("/config")
-def obtener_config():
-    estado = obtener_estado()
+async def obtener_config():
+    global _alerta_ventanilla_mostrada
+    
+    estado = await obtener_estado()
     
     ahora = datetime.now()
     try:
@@ -251,19 +416,32 @@ def obtener_config():
     personas_en_cola = estado['personas']
     personas_estimadas = int(minutos_hasta_cierre / tiempo_por_persona) if tiempo_por_persona > 0 else 0
     
+    # Calcular si hay alerta
+    alerta_nueva_ventanilla = personas_estimadas < personas_en_cola
+
+    if alerta_nueva_ventanilla and not _alerta_ventanilla_mostrada:
+        _alerta_ventanilla_mostrada = True
+    
+    if not alerta_nueva_ventanilla:
+        _alerta_ventanilla_mostrada = False
+    
     return {
         "config": configuracion,
         "estimado": {
             "minutos_hasta_cierre": round(minutos_hasta_cierre, 0),
             "personas_en_cola": personas_en_cola,
             "personas_estimadas_atendidas": personas_estimadas,
-            "alerta_nueva_ventanilla": personas_estimadas < personas_en_cola
+            "alerta_nueva_ventanilla": alerta_nueva_ventanilla,
+            "personas_excedentes": max(0, personas_en_cola - personas_estimadas),  # ← NUEVO
+            "persona_corte": personas_estimadas,  # ← NUEVO: desde qué # van a ventanilla 2
+            "segunda_ventanilla_activa": configuracion['segunda_ventanilla_activa'],  # ← NUEVO
+            "alerta_pendiente": _alerta_ventanilla_mostrada and alerta_nueva_ventanilla  # ← NUEVO
         }
     }
 
 
 @app.post("/config/schedule")
-def actualizar_schedule(data: dict):
+async def actualizar_schedule(data: dict):
     try:
         apertura = data.get('apertura')
         cierre = data.get('cierre')
@@ -277,7 +455,7 @@ def actualizar_schedule(data: dict):
         configuracion['hora_apertura'] = apertura
         configuracion['hora_cierre'] = cierre
         
-        print(f"Horarios actualizados: {apertura} - {cierre}")
+        await _log_async(f"Horarios actualizados: {apertura} - {cierre}")
         return {"status": "ok", "config": configuracion}
     except ValueError as e:
         return {"status": "error", "message": f"Formato inválido: {str(e)}"}
@@ -286,7 +464,7 @@ def actualizar_schedule(data: dict):
 
 
 @app.post("/config/service-time")
-def actualizar_tiempo_atencion(data: dict):
+async def actualizar_tiempo_atencion(data: dict):
     try:
         minutos = data.get('minutos')
         
@@ -299,17 +477,46 @@ def actualizar_tiempo_atencion(data: dict):
         
         configuracion['tiempo_atencion_min'] = minutos
         
-        print(f"Tiempo de atención: {minutos} min")
+        await _log_async(f"Tiempo de atención: {minutos} min")
         return {"status": "ok", "config": configuracion}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
-# ESTADÍSTICAS
+# Endpoint para activar/desactivar segunda ventanilla
+@app.post("/config/segunda-ventanilla")
+async def activar_segunda_ventanilla(data: dict):
+
+    global _alerta_ventanilla_mostrada
+    
+    try:
+        activar = data.get('activar', False)
+        persona_corte = data.get('persona_corte', 0)
+        
+        configuracion['segunda_ventanilla_activa'] = activar
+        configuracion['persona_corte_segunda_ventanilla'] = persona_corte
+        
+        # Marcar que la alerta fue atendida
+        if activar:
+            _alerta_ventanilla_mostrada = False
+            await _log_async(f"✓ Segunda ventanilla ACTIVADA - Corte en persona #{persona_corte}")
+        else:
+            await _log_async(f"✓ Segunda ventanilla DESACTIVADA")
+        
+        return {
+            "status": "ok",
+            "segunda_ventanilla_activa": configuracion['segunda_ventanilla_activa'],
+            "persona_corte": configuracion['persona_corte_segunda_ventanilla']
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ENDPOINTS - ESTADÍSTICAS
+
 @app.get("/estadisticas")
-def obtener_estadisticas():
-    with _stats_lock:
-        stats = _estadisticas.copy()
+async def obtener_estadisticas():
+    stats = _estadisticas.copy()
     
     ahora = datetime.now()
     hora_apertura = datetime.strptime(configuracion['hora_apertura'], '%H:%M').time()
@@ -338,105 +545,126 @@ def obtener_estadisticas():
         stats['estado_ventanilla'] = 'ABIERTA'
         stats['minutos_hasta_cierre'] = int((cierre_dt - ahora).total_seconds() / 60)
     
-    estado = obtener_estado()
+    estado = await obtener_estado()
     stats['personas_actuales'] = estado['personas']
     stats['segmentos_activos'] = estado['segmentos_activos']
+    
+    stats['tiempo_promedio_espera'] = round(stats['tiempo_promedio_espera'], 1)
+    
+    if 'tiempos_espera_acumulados' in stats:
+        del stats['tiempos_espera_acumulados']
     
     return stats
 
 
 @app.post("/estadisticas/reset")
-def resetear_estadisticas():
-    global _estadisticas
-    with _stats_lock:
-        _estadisticas = {
-            'fecha': datetime.now().strftime('%Y-%m-%d'),
-            'personas_atendidas': 0,
-            'tiempo_promedio_espera': 0,
-            'pico_fila': 0,
-        }
+async def resetear_estadisticas():
+    global _estadisticas, _personas_historico
     
-    with _segmentos_lock:
-        _segmentos.clear()
+    _estadisticas = {
+        'fecha': datetime.now().strftime('%Y-%m-%d'),
+        'personas_atendidas': 0,
+        'tiempo_promedio_espera': 0,
+        'pico_fila': 0,
+        'tiempos_espera_acumulados': []
+    }
     
-    print("Estadísticas reseteadas")
+    _segmentos.clear()
+    _personas_historico.clear()
+    
+    await _log_async("✓ Estadísticas reseteadas")
     return {"status": "ok"}
 
 
-# CÁMARAS - FRAMES
-@app.post("/upload-frame")
-async def upload_frame(request: Request):
-    # Leer multipart/form-data completo para depuración y compatibilidad
-    form = await request.form()
-    # Mostrar keys/valores recibidos (no imprimas contenido binario grande)
-    try:
-        keys = list(form.keys())
-        print(f"[upload-frame] form-keys={keys}")
-    except Exception:
-        pass
+# Verificación automática de reseteo diario
+async def _verificar_reseteo_diario():
 
-    # Intentar obtener camera_id
-    camera_id = form.get('camera_id') or form.get('cameraId') or 'default'
-
-    # Obtener el archivo (puede ser UploadFile o SpooledTemporaryFile)
-    file_field = form.get('frame') or form.get('file')
-    contents = b''
-    if file_field is not None:
-        # Si es UploadFile de Starlette
-        if hasattr(file_field, 'read'):
-            contents = await file_field.read()
-        else:
-            try:
-                # si es bytes-like
-                contents = file_field
-            except Exception:
-                contents = b''
-
-    with _frames_lock:
-        _frames[camera_id] = contents
-        _camera_last_seen[camera_id] = time.time()
-
-    try:
-        print(f"[upload-frame] camera_id={camera_id} bytes={len(contents)} last_seen={_camera_last_seen[camera_id]}")
-    except Exception:
-        pass
-
-    return {"status": "ok", "camera_id": camera_id}
-
-
-@app.get('/stream/{camera_id}.mjpg')
-def mjpeg_stream(camera_id: str):
-    print(f"[stream] client requested stream for: {camera_id}")
-    def gen():
-        while True:
-            with _frames_lock:
-                frame = _frames.get(camera_id)
-            if frame:
-                yield b'--frame\r\n'
-                yield b'Content-Type: image/jpeg\r\n'
-                yield f'Content-Length: {len(frame)}\r\n\r\n'.encode()
-                yield frame
-                yield b'\r\n'
-            time.sleep(0.05)
+    global _estadisticas, _personas_historico, _ultimo_reseteo
     
-    return StreamingResponse(gen(), media_type='multipart/x-mixed-replace; boundary=frame')
+    ahora = datetime.now()
+    
+    # Resetear a medianoche 
+    if ahora.date() > _ultimo_reseteo.date():
+        await _log_async(f" Nuevo día detectado: {ahora.date()}")
+        await _resetear_estadisticas_interno()
+        return
+    
+    # Resetear después de la hora de cierre
+    try:
+        hora_cierre = datetime.strptime(configuracion['hora_cierre'], '%H:%M').time()
+        cierre_dt = datetime.combine(ahora.date(), hora_cierre)
+        
+        if ahora >= cierre_dt:
+            ultimo_cierre_hoy = datetime.combine(ahora.date(), hora_cierre)
+            
+            if _ultimo_reseteo < ultimo_cierre_hoy:
+                await _log_async(f" Hora de cierre alcanzada: {hora_cierre}")
+                await _resetear_estadisticas_interno()
+                return
+    except:
+        pass
 
 
-@app.get('/cameras')
-def list_cameras():
-    with _frames_lock:
-        ahora = time.time()
-        cameras = [
-            {
-                "camera_id": cam,
-                "activo": ahora - _camera_last_seen.get(cam, 0) < 5,
-                "last_seen": _camera_last_seen.get(cam)
-            }
-            for cam in _frames.keys()
-        ]
-    return {"cameras": cameras}
+async def _resetear_estadisticas_interno():
+    """Resetear estadísticas internamente (llamado por verificación automática)"""
+    global _estadisticas, _personas_historico, _ultimo_reseteo
+    
+    # Guardar estadísticas del día anterior 
+    stats_anteriores = _estadisticas.copy()
+    await _log_async(f"""
 
+    RESUMEN DEL DÍA: {stats_anteriores['fecha']}
+
+    Personas Atendidas: {stats_anteriores['personas_atendidas']}
+    Tiempo Promedio: {stats_anteriores.get('tiempo_promedio_espera', 0):.1f} min
+    Pico Máximo: {stats_anteriores['pico_fila']} personas
+    """)
+    
+    # Resetear estadísticas
+    _estadisticas = {
+        'fecha': datetime.now().strftime('%Y-%m-%d'),
+        'personas_atendidas': 0,
+        'tiempo_promedio_espera': 0,
+        'pico_fila': 0,
+        'tiempos_espera_acumulados': []
+    }
+    
+    _personas_historico.clear()
+    _ultimo_reseteo = datetime.now()
+    
+    await _log_async("Estadísticas reseteadas automáticamente")
+
+
+# UTILIDADES
+
+async def _log_async(message: str):
+    """Log asíncrono que no bloquea"""
+    await asyncio.sleep(0) 
+    print(message)
+
+
+# SERVIDOR
 
 if __name__ == "__main__":
-    print(f"Configuración: {configuracion}")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import sys
+    import platform
+
+    is_windows = platform.system() == 'Windows'
+    
+    if is_windows:
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=8000,
+            limit_concurrency=100,
+            timeout_keep_alive=5
+        )
+    else:
+        uvicorn.run(
+            "backend:app",  
+            host="0.0.0.0",
+            port=8000,
+            workers=2,
+            limit_concurrency=100,
+            timeout_keep_alive=5
+        )

@@ -1,4 +1,3 @@
-
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -10,15 +9,34 @@ import time
 import threading
 import os
 import argparse
+import torch
 
 # CONFIGURACIÓN
 
 URL_BACKEND = "http://127.0.0.1:8000"
 INTERVALO_ENVIO = 2
+INTERVALO_FRAME = 5  
+MAX_INTENTOS_ENVIO = 1  
 
-print("Cargando modelo YOLO...")
-model = YOLO('yolov8n.pt')
-print("Modelo cargado")
+print("Cargando modelo YOLOv8s...")
+model = YOLO('yolov8s.pt')
+
+# OPTIMIZACIONES DEL MODELO
+if torch.cuda.is_available():
+    model.to('cuda')
+else:
+    print("Modelo en CPU")
+
+# Fusionar capas para mayor velocidad
+model.fuse()
+
+# Configurar para detección optimizada de personas
+model.overrides['conf'] = 0.25      # Umbral bajo inicial
+model.overrides['iou'] = 0.45       # NMS threshold
+model.overrides['classes'] = [0]    # Solo clase 
+model.overrides['max_det'] = 50     # Máximo 50 personas por frame
+
+print("✓ Modelo optimizado")
 
 try:
     raw_names = model.names
@@ -26,34 +44,44 @@ try:
 except:
     classNames = {0: 'person'}
 
+OBJETIVO = "person"
+
 # ARGUMENTOS CLI
 
-parser = argparse.ArgumentParser(description='Detector Multi-Cámara para Fila Extendida')
+parser = argparse.ArgumentParser(description='Detector Multi-Cámara Optimizado')
 
 parser.add_argument('--camera-url', type=str, default=None,
                     help='URL de la cámara IP')
 
 parser.add_argument('--camera-id', type=str, required=True,
-                    help='ID único de esta cámara (ej: cam_interior, cam_puerta, cam_exterior)')
+                    help='ID único de esta cámara')
 
 parser.add_argument('--segmento', type=int, required=True,
-                    help='Número de segmento en la fila (1=más cerca de ventanilla, 2=siguiente, 3=más lejos)')
+                    help='Número de segmento (1=cerca, 2=medio, 3=lejos)')
 
-parser.add_argument('--umbral-confianza', type=float, default=0.50,
-                    help='Umbral de confianza YOLO')
+parser.add_argument('--umbral-confianza', type=float, default=0.35,
+                    help='Umbral de confianza YOLO (bajado para detectar personas parciales)')
 
 parser.add_argument('--distancia-fusion', type=int, default=80,
-                    help='Distancia para fusionar detecciones (madre-bebé)')
+                    help='Distancia para fusionar detecciones')
 
-# Zonas personalizables por cámara
 parser.add_argument('--zona-fila', type=str, default=None,
-                    help='Coordenadas zona fila: "x1,y1,x2,y2,x3,y3,x4,y4"')
+                    help='Coordenadas zona: "x1,y1,x2,y2,x3,y3,x4,y4"')
 
-parser.add_argument('--distancia-max', type=int, default=100,
-                    help='Distancia máxima (px) para hacer matching entre frames')
+parser.add_argument('--distancia-max', type=int, default=150,
+                    help='Distancia máxima para matching')
 
-parser.add_argument('--max-disappeared', type=int, default=45,
-                    help='Cantidad de frames sin detección antes de eliminar un objeto')
+parser.add_argument('--max-disappeared', type=int, default=60,
+                    help='Frames sin detección antes de eliminar')
+
+parser.add_argument('--area-minima', type=int, default=400,
+                    help='Área mínima del bbox (px²) - reducido para personas parciales')
+
+parser.add_argument('--aspect-min', type=float, default=0.8,
+                    help='Aspect ratio mínimo (alto/ancho) - permite personas cortadas')
+
+parser.add_argument('--aspect-max', type=float, default=5.0,
+                    help='Aspect ratio máximo (alto/ancho) - más permisivo')
 
 args = parser.parse_args()
 
@@ -61,13 +89,11 @@ args = parser.parse_args()
 
 camera_id = args.camera_id
 segmento = args.segmento
-url_camara = args.camera_url or os.getenv('CAMERA_URL') or "http://192.168.0.8:8080/video"
+url_camara = args.camera_url or os.getenv('CAMERA_URL') or "http://10.188.219.225:8080/video"
 
-
-# ZONA DE FILA 
+# ZONA DE FILA
 
 if args.zona_fila:
-    # Parsear coordenadas desde argumento
     coords = [int(x) for x in args.zona_fila.split(',')]
     puntos_zona_fila = [
         [coords[0], coords[1]],
@@ -76,24 +102,20 @@ if args.zona_fila:
         [coords[6], coords[7]]
     ]
 else:
-    # Zona por defecto 
     puntos_zona_fila = [
-        [100, 100],
-        [1180, 100],
-        [1180, 700],
-        [100, 700]
+        [0, 0],          
+        [1280, 0],
+        [1280, 720],
+        [0, 720]
     ]
 
 zona_fila = Polygon(puntos_zona_fila)
 zona_fila_dibujo = np.array(puntos_zona_fila, np.int32).reshape((-1, 1, 2))
 
-# TRACKER SIMPLE 
+# TRACKER MEJORADO CON PREDICCIÓN
 
 class TrackerSegmento:
-    """
-    Tracker simple para un segmento de la fila.
-    No necesita Re-ID porque solo cuenta personas en SU zona.
-    """
+    """Tracker avanzado con predicción de movimiento"""
     
     def __init__(self, distancia_fusion=80, distancia_max=100, max_disappeared=45):
         self.distancia_fusion = distancia_fusion
@@ -102,28 +124,34 @@ class TrackerSegmento:
         
         self.next_id = 0
         self.objects = {}           # id -> centro
-        self.disappeared = {}       # id -> frames
+        self.disappeared = {}       # id -> frames sin detectar
         self.bboxes = {}            # id -> bbox
         self.tiempo_entrada = {}    # id -> timestamp
+        
+        self.velocidades = {}       # id -> (vx, vy)
+        self.last_update = {}       # id -> timestamp
+        self.confianzas = {}        # id -> confianza promedio
     
-    def _fusionar_detecciones(self, detecciones, bboxes):
+    def _fusionar_detecciones(self, detecciones, bboxes, confianzas):
         """Fusionar detecciones cercanas (madre-bebé)"""
         if len(detecciones) <= 1:
-            return detecciones, bboxes
+            return detecciones, bboxes, confianzas
         
         fusionadas = []
         bboxes_f = []
+        confs_f = []
         usadas = set()
         
-        for i, (c1, b1) in enumerate(zip(detecciones, bboxes)):
+        for i, (c1, b1, conf1) in enumerate(zip(detecciones, bboxes, confianzas)):
             if i in usadas:
                 continue
             
             grupo_c = [c1]
             grupo_b = [b1]
+            grupo_conf = [conf1]
             usadas.add(i)
             
-            for j, (c2, b2) in enumerate(zip(detecciones, bboxes)):
+            for j, (c2, b2, conf2) in enumerate(zip(detecciones, bboxes, confianzas)):
                 if j in usadas:
                     continue
                 
@@ -131,32 +159,50 @@ class TrackerSegmento:
                 if dist < self.distancia_fusion:
                     grupo_c.append(c2)
                     grupo_b.append(b2)
+                    grupo_conf.append(conf2)
                     usadas.add(j)
             
-            # Usar bbox más grande
+            # Usar bbox con mayor confianza
             if len(grupo_c) > 1:
-                areas = [(b[2]-b[0])*(b[3]-b[1]) for b in grupo_b]
-                idx = np.argmax(areas)
+                idx = np.argmax(grupo_conf)
                 bbox_f = grupo_b[idx]
                 centro_f = (int((bbox_f[0]+bbox_f[2])/2), int(bbox_f[3]))
+                conf_f = grupo_conf[idx]
             else:
                 centro_f = grupo_c[0]
                 bbox_f = grupo_b[0]
+                conf_f = grupo_conf[0]
             
             fusionadas.append(centro_f)
             bboxes_f.append(bbox_f)
+            confs_f.append(conf_f)
         
-        return fusionadas, bboxes_f
+        return fusionadas, bboxes_f, confs_f
     
-    def actualizar(self, detecciones, bboxes=None):
+    def _predecir_posicion(self, oid):
+        """Predecir posicion basada en velocidad"""
+        if oid not in self.velocidades:
+            return self.objects[oid]
+        
+        vx, vy = self.velocidades[oid]
+        x, y = self.objects[oid]
+        
+        # Predicción simple
+        return (int(x + vx), int(y + vy))
+    
+    def actualizar(self, detecciones, bboxes=None, confianzas=None):
         if bboxes is None:
             bboxes = [None] * len(detecciones)
+        if confianzas is None:
+            confianzas = [1.0] * len(detecciones)
         
-        # Fusionar
+        # Fusionar detecciones cercanas
         if len(detecciones) > 0 and bboxes[0] is not None:
-            detecciones, bboxes = self._fusionar_detecciones(detecciones, bboxes)
+            detecciones, bboxes, confianzas = self._fusionar_detecciones(
+                detecciones, bboxes, confianzas
+            )
         
-        # Sin detecciones
+        # Sin detecciones: incrementar disappeared
         if len(detecciones) == 0:
             for oid in list(self.disappeared.keys()):
                 self.disappeared[oid] += 1
@@ -164,22 +210,26 @@ class TrackerSegmento:
                     self._eliminar(oid)
             return self.objects
         
-        # Sin objetos previos
+        # Sin objetos previos: registrar todos
         if len(self.objects) == 0:
-            for c, b in zip(detecciones, bboxes):
-                self._registrar(c, b)
+            for c, b, conf in zip(detecciones, bboxes, confianzas):
+                self._registrar(c, b, conf)
             return self.objects
         
-        # Matching
+        #  MATCHING CON PREDICCIÓN
         obj_ids = list(self.objects.keys())
         costos = np.full((len(obj_ids), len(detecciones)), np.inf)
         
         for i, oid in enumerate(obj_ids):
+            # Usar posición predicha
+            pos_predicha = self._predecir_posicion(oid)
+            
             for j, c in enumerate(detecciones):
-                d = np.linalg.norm(np.array(self.objects[oid]) - np.array(c))
+                d = np.linalg.norm(np.array(pos_predicha) - np.array(c))
                 if d <= self.distancia_max:
                     costos[i, j] = d
         
+        # Algoritmo húngaro simplificado
         asignaciones = {}
         usadas = set()
         
@@ -193,39 +243,65 @@ class TrackerSegmento:
             costos[i, :] = np.inf
             costos[:, j] = np.inf
         
-        # Actualizar asignados
         for oid, j in asignaciones.items():
-            self.objects[oid] = detecciones[j]
+            pos_anterior = self.objects[oid]
+            pos_nueva = detecciones[j]
+            
+            # Calcular velocidad
+            vx = pos_nueva[0] - pos_anterior[0]
+            vy = pos_nueva[1] - pos_anterior[1]
+            
+            # Suavizado de velocidad 
+            if oid in self.velocidades:
+                vx_old, vy_old = self.velocidades[oid]
+                vx = 0.7 * vx + 0.3 * vx_old
+                vy = 0.7 * vy + 0.3 * vy_old
+            
+            self.velocidades[oid] = (vx, vy)
+            self.objects[oid] = pos_nueva
             self.disappeared[oid] = 0
+            self.last_update[oid] = time.time()
+            
+            # Actualizar confianza 
+            if oid in self.confianzas:
+                self.confianzas[oid] = 0.8 * self.confianzas[oid] + 0.2 * confianzas[j]
+            else:
+                self.confianzas[oid] = confianzas[j]
+            
             if bboxes[j]:
                 self.bboxes[oid] = bboxes[j]
         
-        # Disappeared
+        # Incrementar disappeared para no asignados
         for i, oid in enumerate(obj_ids):
             if oid not in asignaciones:
                 self.disappeared[oid] += 1
                 if self.disappeared[oid] > self.max_disappeared:
                     self._eliminar(oid)
         
-        # Nuevas
-        for j, (c, b) in enumerate(zip(detecciones, bboxes)):
+        # Registrar nuevas detecciones
+        for j, (c, b, conf) in enumerate(zip(detecciones, bboxes, confianzas)):
             if j not in usadas:
-                self._registrar(c, b)
+                self._registrar(c, b, conf)
         
         return self.objects
     
-    def _registrar(self, centro, bbox):
+    def _registrar(self, centro, bbox, confianza=1.0):
         self.objects[self.next_id] = centro
         self.disappeared[self.next_id] = 0
         self.tiempo_entrada[self.next_id] = time.time()
+        self.velocidades[self.next_id] = (0, 0)
+        self.last_update[self.next_id] = time.time()
+        self.confianzas[self.next_id] = confianza
         if bbox:
             self.bboxes[self.next_id] = bbox
-        print(f"[tracker] registrar id={self.next_id} centro={centro} bbox={'yes' if bbox else 'no'}")
+        print(f"[tracker] ✓ Registrar ID={self.next_id} conf={confianza:.2f}")
         self.next_id += 1
     
     def _eliminar(self, oid):
-        print(f"[tracker] eliminar id={oid}")
-        for d in [self.objects, self.disappeared, self.bboxes, self.tiempo_entrada]:
+        print(f"[tracker] ✗ Eliminar ID={oid}")
+        for d in [self.objects, self.disappeared, self.bboxes, 
+                    self.tiempo_entrada, self.velocidades, self.last_update, 
+                    self.confianzas]:
             if oid in d:
                 del d[oid]
     
@@ -237,15 +313,18 @@ class TrackerSegmento:
                 personas.append({
                     'local_id': oid,
                     'centro': centro,
+                    'centro_x': centro[0],
                     'centro_y': centro[1],
-                    'bbox': self.bboxes.get(oid)
+                    'bbox': self.bboxes.get(oid),
+                    'confianza': self.confianzas.get(oid, 0.0)
                 })
         
-        # Ordenar por Y (menor = más adelante)
+        # Ordenar por Y 
         personas.sort(key=lambda x: x['centro_y'])
         return personas
 
 
+# Inicializar tracker
 tracker = TrackerSegmento(
     distancia_fusion=args.distancia_fusion,
     distancia_max=args.distancia_max,
@@ -257,205 +336,374 @@ tracker = TrackerSegmento(
 cap = cv2.VideoCapture(url_camara)
 
 if not cap.isOpened():
-    print(f"No se pudo conectar a {url_camara}, probando webcam...")
+    print(f" No se pudo conectar a {url_camara}, probando webcam...")
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("Error: No hay cámara")
+        print(" Error: No hay camara disponible")
         exit()
 
-print("Cámara conectada ✓")
+print("Cámara conectada")
 
-# COMUNICACIÓN CON BACKEND
+# COMUNICACIÓN CON BACKEND 
+
+# Variables de control
+ultimo_envio_datos = 0
+ultimo_envio_frame = 0
+envios_pendientes = 0
+MAX_ENVIOS_PENDIENTES = 2  
 
 def enviar_datos_segmento(datos):
-    """Enviar datos de este segmento al backend"""
+    """Enviar datos de este segmento al backend (optimizado)"""
+    global envios_pendientes
     try:
+        envios_pendientes += 1
         url = f"{URL_BACKEND}/segmento-fila"
-        requests.post(url, json=datos, timeout=2)
+        response = requests.post(url, json=datos, timeout=0.5) 
+        response.raise_for_status()
+    except requests.exceptions.Timeout:
+        pass  
     except Exception as e:
-        pass
+        pass 
+    finally:
+        envios_pendientes = max(0, envios_pendientes - 1)
 
 
 def enviar_frame(img):
-    """Enviar frame al backend"""
+    """Enviar frame al backend (muy optimizado)"""
+    global envios_pendientes
+    
+    # No enviar si hay muchos pendientes
+    if envios_pendientes > MAX_ENVIOS_PENDIENTES:
+        return
+    
     try:
-        ret, jpeg = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        envios_pendientes += 1
+        
+        # Comprimir MUCHO más 
+        small = cv2.resize(img, (320, 180), interpolation=cv2.INTER_AREA)
+        
+        # Calidad JPEG más baja 
+        ret, jpeg = cv2.imencode('.jpg', small, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
+        
         if ret:
             url = f"{URL_BACKEND}/upload-frame"
             files = {'frame': ('frame.jpg', jpeg.tobytes(), 'image/jpeg')}
-            requests.post(url, files=files, data={'camera_id': camera_id}, timeout=3)
-    except:
-        pass
+            
+            # Timeout MUY corto para frames 
+            response = requests.post(
+                url, 
+                files=files, 
+                data={'camera_id': camera_id}, 
+                timeout=0.3  # ← Solo 300ms
+            )
+            response.raise_for_status()
+    except requests.exceptions.Timeout:
+        pass  
+    except Exception as e:
+        pass 
+    finally:
+        envios_pendientes = max(0, envios_pendientes - 1)
 
+# PREPROCESAMIENTO MEJORADO
+
+def preprocesar(img):
+    """Preprocesar con aspect ratio y padding"""
+    h, w = img.shape[:2]
+    target_h, target_w = 720, 1280
+    
+    # Redimensionar manteniendo aspect ratio
+    scale = min(target_w / w, target_h / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    
+    # Crear canvas con padding
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    x_offset = (target_w - new_w) // 2
+    y_offset = (target_h - new_h) // 2
+    canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
+    
+    return canvas
 
 # BUCLE PRINCIPAL
 
-def preprocesar(img):
-    return cv2.resize(img, (1280, 720))
-
-
-ultimo_envio = time.time()
+ultimo_envio_datos = 0
+ultimo_envio_frame = 0
 frame_count = 0
 UMBRAL = args.umbral_confianza
 last_diag_time = 0
 
+# Estadísticas
+total_detecciones = 0
+total_filtradas = 0
+
 # Colores según segmento
 COLORES_SEGMENTO = {
-    1: (0, 255, 0),    # Verde - cerca de ventanilla
-    2: (255, 165, 0),  # Naranja - medio
-    3: (255, 0, 0),    # Rojo - exterior/lejos
+    1: (0, 255, 0),      # Verde
+    2: (255, 165, 0),    # Naranja
+    3: (255, 0, 0),      # Rojo
 }
 color_segmento = COLORES_SEGMENTO.get(segmento, (255, 255, 255))
 
 print(f"""
-Controles:
-  'q' - Salir
-  '+' - Aumentar umbral
-  '-' - Disminuir umbral
-  'z' - Mostrar/ocultar zona
+  Cámara: {camera_id}
+  Segmento: {segmento}
+  Modelo: YOLOv8s
+  Umbral: {UMBRAL}
+  
+  Controles:
+    'q' → Salir
+    '+' → Aumentar umbral (+0.05)
+    '-' → Disminuir umbral (-0.05)
+    'z' → Mostrar/ocultar zona
+    'i' → Toggle info detallada
 
-Iniciando detección...
 """)
 
 mostrar_zona = True
+mostrar_info_detallada = False
 
 while True:
     success, img = cap.read()
     if not success:
-        print("Error leyendo cámara")
+        print("✗ Error leyendo cámara")
         break
     
     frame_count += 1
     img = preprocesar(img)
     
-    #  DIBUJAR INFO DEL SEGMENTO 
+    # DIBUJAR INFO DEL SEGMENTO
     
-    # Etiqueta del segmento
     cv2.putText(img, f"SEGMENTO {segmento}: {camera_id}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, color_segmento, 2)
     
-    # Dibujar zona de fila
     if mostrar_zona:
         cv2.polylines(img, [zona_fila_dibujo], True, color_segmento, 2)
     
-    #  DETECCIÓN YOLO
+    # DETECCIÓN YOLO CON FILTROS AVANZADOS
     
     results = model(img, stream=True, verbose=False)
     
     centros = []
     bboxes = []
+    confianzas = []
+    detecciones_brutas = 0
     
     for r in results:
         for box in r.boxes:
-            if classNames[int(box.cls[0])] == "person":
+            if classNames[int(box.cls[0])] == OBJETIVO:
+                detecciones_brutas += 1
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 conf = float(box.conf[0])
                 
-                if conf > UMBRAL:
-                    cx = int((x1 + x2) / 2)
-                    cy = int(y2)
+                # FILTRO 1: Confianza
+                if conf <= UMBRAL:
+                    continue
+                
+                # FILTRO 2: Dimensiones del bbox 
+                ancho = x2 - x1
+                alto = y2 - y1
+                area = ancho * alto
+                aspect_ratio = alto / ancho if ancho > 0 else 0
+                
+                if area < args.area_minima:
+                    continue
+                
+                # Ancho/Alto mínimos individuales 
+                if ancho < 30 or alto < 40:
+                    continue
+                
+                # Proporción humana AMPLIA 
+                if aspect_ratio < args.aspect_min or aspect_ratio > args.aspect_max:
+                    continue
+                
+                # Tamaño máximo MÁS PERMISIVO 
+                if ancho > 600 or alto > 900:
+                    continue
+                
+                # FILTRO 3: Proximidad a la zona 
+                cx = int((x1 + x2) / 2)
+                cy = int(y2)  # Punto inferior del bbox
+                
+                punto = Point(cx, cy)
+                
+                if zona_fila.contains(punto):
                     centros.append((cx, cy))
                     bboxes.append((x1, y1, x2, y2))
+                    confianzas.append(conf)
     
-    # TRACKING 
+    total_detecciones += detecciones_brutas
+    total_filtradas += (detecciones_brutas - len(centros))
     
-    tracker.actualizar(centros, bboxes)
+    # TRACKING
+    
+    tracker.actualizar(centros, bboxes, confianzas)
     personas_ordenadas = tracker.obtener_personas_ordenadas(zona_fila)
     personas_en_segmento = len(personas_ordenadas)
     
-    # Diagnostic mínimo: cada INTERVALO_ENVIO mostrar conteos
-    try:
-        if time.time() - last_diag_time > INTERVALO_ENVIO:
-            print(f"[diag] frame={frame_count} detecciones_yolo={len(centros)} tracked={len(tracker.objects)} personas_en_segmento={personas_en_segmento}")
-            last_diag_time = time.time()
-    except NameError:
+    # Diagnóstico
+    if time.time() - last_diag_time > INTERVALO_ENVIO:
+        tasa_filtrado = (total_filtradas / total_detecciones * 100) if total_detecciones > 0 else 0
+        print(f"[diag] Frame={frame_count} | YOLO={len(centros)} | Tracked={len(tracker.objects)} | Fila={personas_en_segmento} | Filtrado={tasa_filtrado:.1f}%")
         last_diag_time = time.time()
     
-    # DIBUJAR PERSONAS 
+    # DIBUJAR PERSONAS
     
     for idx, persona in enumerate(personas_ordenadas):
         centro = persona['centro']
         bbox = persona['bbox']
+        conf = persona['confianza']
         
-        # Número local en este segmento
         num_local = idx + 1
         
+        # Color según confianza
+        if conf > 0.75:
+            color_bbox = (0, 255, 0)  # Verde alto
+        elif conf > 0.60:
+            color_bbox = (255, 255, 0)  # Amarillo medio
+        else:
+            color_bbox = (255, 165, 0)  # Naranja bajo
+        
+        # Dibujar bbox
         if bbox:
-            cv2.rectangle(img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color_segmento, 2)
+            cv2.rectangle(img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color_bbox, 2)
+            
+            # Etiqueta con confianza
+            label = f"#{num_local}"
+            if mostrar_info_detallada:
+                label += f" {conf:.2f}"
+            
+            # Fondo para texto
+            (w_txt, h_txt), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(img, (bbox[0], bbox[1]-h_txt-8), 
+                            (bbox[0]+w_txt+8, bbox[1]), color_bbox, -1)
+            cv2.putText(img, label, (bbox[0]+4, bbox[1]-4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
         
-        # Mostrar posición en la fila
-        cv2.putText(img, f"#{num_local}", (centro[0]-15, centro[1]-15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        
+        # Centro
         cv2.circle(img, centro, 5, color_segmento, -1)
+        
+        # Velocidad (opcional)
+        if mostrar_info_detallada and persona['local_id'] in tracker.velocidades:
+            vx, vy = tracker.velocidades[persona['local_id']]
+            if abs(vx) > 1 or abs(vy) > 1:
+                end_x = int(centro[0] + vx * 5)
+                end_y = int(centro[1] + vy * 5)
+                cv2.arrowedLine(img, centro, (end_x, end_y), (0, 255, 255), 2)
     
-    # PANEL INFO 
+    # PANEL DE INFORMACIÓN
     
     overlay = img.copy()
-    cv2.rectangle(overlay, (10, 50), (300, 180), (0, 0, 0), -1)
+    panel_h = 210 if mostrar_info_detallada else 180
+    cv2.rectangle(overlay, (10, 50), (320, 50 + panel_h), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
     
     y = 75
-    cv2.putText(img, f'Personas en segmento: {personas_en_segmento}', (20, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(img, f'Personas: {personas_en_segmento}', (20, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
     
-    y += 30
+    y += 35
     cv2.putText(img, f'Umbral: {UMBRAL:.2f}', (20, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1)
     
     y += 25
     cv2.putText(img, f'Frame: {frame_count}', (20, y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
     
+    y += 25
+    cv2.putText(img, f'Detecciones: {len(centros)}', (20, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+    
+    y += 25
+    cv2.putText(img, f'Tracked: {len(tracker.objects)}', (20, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+    
+    if mostrar_info_detallada:
+        y += 25
+        tasa = (total_filtradas / total_detecciones * 100) if total_detecciones > 0 else 0
+        cv2.putText(img, f'Filtrado: {tasa:.1f}%', (20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+    
     # Estado conexión
-    online = time.time() - ultimo_envio < 3
-    cv2.circle(img, (280, 65), 8, (0, 255, 0) if online else (0, 0, 255), -1)
+    tiempo_actual = time.time()
+    online_datos = tiempo_actual - ultimo_envio_datos < (INTERVALO_ENVIO + 1)
+    online_frame = tiempo_actual - ultimo_envio_frame < (INTERVALO_FRAME + 1)
+    
+    # Indicador de conexión 
+    if online_datos and online_frame:
+        color_conexion = (0, 255, 0)  # Verde
+    elif online_datos or online_frame:
+        color_conexion = (0, 255, 255)  # Amarillo
+    else:
+        color_conexion = (0, 0, 255)  # Rojo
+    
+    cv2.circle(img, (290, 65), 8, color_conexion, -1)
+    
+    if envios_pendientes > 0:
+        cv2.putText(img, f'Queue: {envios_pendientes}', (245, 85),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
     
     # ENVIAR AL BACKEND 
     
-    if time.time() - ultimo_envio > INTERVALO_ENVIO:
-        datos = {
-            "camera_id": camera_id,
-            "segmento": segmento,
-            "personas_count": personas_en_segmento,
-            "personas": [
-                {
-                    "local_pos": idx + 1,
-                    "centro_y": p["centro_y"]
-                }
-                for idx, p in enumerate(personas_ordenadas)
-            ],
-            "timestamp": time.time()
-        }
-        
-        threading.Thread(target=enviar_datos_segmento, args=(datos,)).start()
-        
-        try:
-            small = cv2.resize(img, (640, 360))
-            threading.Thread(target=enviar_frame, args=(small,)).start()
-        except:
-            pass
-        
-        ultimo_envio = time.time()
+    tiempo_actual = time.time()
     
-    #  MOSTRAR
+    # ENVIAR DATOS 
+    if tiempo_actual - ultimo_envio_datos > INTERVALO_ENVIO:  
+        if envios_pendientes <= MAX_ENVIOS_PENDIENTES:
+            datos = {
+                "camera_id": camera_id,
+                "segmento": segmento,
+                "personas_count": personas_en_segmento,
+                "personas": [
+                    {
+                        "local_pos": idx + 1,
+                        "centro_x": p["centro_x"],
+                        "centro_y": p["centro_y"],
+                        "confianza": p["confianza"]
+                    }
+                    for idx, p in enumerate(personas_ordenadas)
+                ],
+                "timestamp": tiempo_actual
+            }
+            
+            threading.Thread(target=enviar_datos_segmento, args=(datos,), daemon=True).start()
+            ultimo_envio_datos = tiempo_actual
+    
+    # ENVIAR FRAME 
+
+    if tiempo_actual - ultimo_envio_frame > INTERVALO_FRAME:  
+        if envios_pendientes <= MAX_ENVIOS_PENDIENTES:
+            try:
+                threading.Thread(target=enviar_frame, args=(img.copy(),), daemon=True).start()
+                ultimo_envio_frame = tiempo_actual
+            except:
+                pass
+    
+    # MOSTRAR
     
     cv2.imshow(f"Segmento {segmento} - {camera_id}", img)
     
-    #  CONTROLES 
+    # CONTROLES
     
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
         break
     elif key == ord('+') or key == ord('='):
         UMBRAL = min(0.95, UMBRAL + 0.05)
-        print(f"Umbral: {UMBRAL:.2f}")
+        print(f"✓ Umbral: {UMBRAL:.2f}")
     elif key == ord('-'):
         UMBRAL = max(0.20, UMBRAL - 0.05)
-        print(f"Umbral: {UMBRAL:.2f}")
+        print(f"✓ Umbral: {UMBRAL:.2f}")
     elif key == ord('z'):
         mostrar_zona = not mostrar_zona
+        print(f"✓ Zona: {'visible' if mostrar_zona else 'oculta'}")
+    elif key == ord('i'):
+        mostrar_info_detallada = not mostrar_info_detallada
+        print(f"✓ Info detallada: {'ON' if mostrar_info_detallada else 'OFF'}")
+
+# FINALIZACIÓN
 
 cap.release()
 cv2.destroyAllWindows()
-print(f"\nSegmento {segmento} detenido. Frames: {frame_count}")
+
+tasa_final = (total_filtradas / total_detecciones * 100) if total_detecciones > 0 else 0

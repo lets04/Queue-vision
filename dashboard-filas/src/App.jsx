@@ -55,7 +55,7 @@ const CameraView = ({ cameraId, title }) => {
 // COMPONENTE PRINCIPAL: VISTA CLIENTE
 
 function App() {
-  const [ setDatos] = useState({
+  const [setDatos] = useState({
     personas: 0,
     tiempo_espera_min: 0,
     alerta: false,
@@ -74,6 +74,8 @@ function App() {
   const [estimado, setEstimado] = useState({});
   const [mostrarAdmin, setMostrarAdmin] = useState(false);
   const [ranking, setRanking] = useState([]);
+  const [segundaVentanillaActiva, setSegundaVentanillaActiva] = useState(false);
+  const [personaCorte, setPersonaCorte] = useState(0);
 
   // Obtener datos
   useEffect(() => {
@@ -100,8 +102,14 @@ function App() {
       try {
         const response = await fetch(`${API_URL}/config`);
         const data = await response.json();
-        setConfig(data.config || config);
+        setConfig(data.config || { hora_apertura: "09:00", hora_cierre: "17:00" });
         setEstimado(data.estimado || {});
+        
+        // Actualizar estado de segunda ventanilla
+        if (data.config) {
+          setSegundaVentanillaActiva(data.config.segunda_ventanilla_activa || false);
+          setPersonaCorte(data.config.persona_corte_segunda_ventanilla || 0);
+        }
       } catch (error) {
         console.error('Error al obtener configuración:', error);
       }
@@ -146,7 +154,6 @@ function App() {
               </button>
               <div className={`status-indicator ${conectado ? 'online' : 'offline'}`}>
                 <div className="status-dot"></div>
-                <span>{conectado ? 'En línea' : 'Sin conexión'}</span>
               </div>
               {ultimaActualizacion && (
                 <span className="last-update">
@@ -160,6 +167,39 @@ function App() {
         {/* Contenido Principal */}
         <main className="main-content">
           
+          {/* Notificación Segunda Ventanilla */}
+          {segundaVentanillaActiva && (
+            <section style={{
+              background: 'linear-gradient(135deg, rgba(34,197,94,0.15) 0%, rgba(16,185,129,0.15) 100%)',
+              border: '2px solid #22c55e',
+              borderRadius: '16px',
+              padding: '2rem',
+              marginBottom: '2rem',
+              animation: 'pulse 2s ease-in-out infinite'
+            }}>
+              <style>{`
+                @keyframes pulse {
+                  0%, 100% { transform: scale(1); }
+                  50% { transform: scale(1.02); }
+                }
+              `}</style>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '3rem', marginBottom: '1rem', color: '#22c55e' }}>●</div>
+                <h2 style={{ color: '#22c55e', fontSize: '2rem', fontWeight: '700', marginBottom: '1rem' }}>
+                  SEGUNDA VENTANILLA HABILITADA
+                </h2>
+                <p style={{ color: '#fff', fontSize: '1.3rem', marginBottom: '0.5rem' }}>
+                  Personas 1 a {personaCorte} → <strong style={{ color: '#3b82f6' }}>VENTANILLA 1</strong>
+                </p>
+                <p style={{ color: '#fff', fontSize: '1.3rem' }}>
+                  Desde persona #{personaCorte + 1} → <strong style={{ color: '#22c55e' }}>VENTANILLA 2</strong>
+                </p>
+              </div>
+            </section>
+          )}
+
+          {/* Métricas Principales */}
+
           {/* 2 Cámaras Fijas */}
           <section className="cameras-section">
             <h2 className="section-title">Cámaras en Tiempo Real</h2>
@@ -187,25 +227,47 @@ function App() {
                         <th>ID</th>
                         <th>Tiempo Espera</th>
                         <th>Estado</th>
+                        {segundaVentanillaActiva && <th>Ventanilla</th>}
                       </tr>
                     </thead>
                     <tbody>
-                      {ranking.map((persona) => (
-                        <tr key={persona.id} className={`rank-${persona.posicion}`}>
-                          <td className="posicion">#{persona.posicion + 1}</td>
-                          <td className="id">ID: {persona.id}</td>
-                          <td className="tiempo">
-                            <span className="tiempo-badge">{persona.tiempo_espera_min} min</span>
-                          </td>
-                          <td className="estado">
-                            {persona.posicion === 0 ? (
-                              <span className="badge badge-atencion">SIENDO ATENDIDO</span>
-                            ) : (
-                              <span className="badge badge-espera">EN ESPERA</span>
+                      {ranking.map((persona) => {
+                        const posicion = persona.posicion + 1;
+                        const ventanilla = posicion <= personaCorte ? 1 : 2;
+                        const colorVentanilla = ventanilla === 1 ? '#3b82f6' : '#22c55e';
+                        
+                        return (
+                          <tr key={persona.id} className={`rank-${persona.posicion}`}>
+                            <td className="posicion">#{posicion}</td>
+                            <td className="id">ID: {persona.id}</td>
+                            <td className="tiempo">
+                              <span className="tiempo-badge">{persona.tiempo_espera_min} min</span>
+                            </td>
+                            <td className="estado">
+                              {persona.posicion === 0 ? (
+                                <span className="badge badge-atencion">SIENDO ATENDIDO</span>
+                              ) : (
+                                <span className="badge badge-espera">EN ESPERA</span>
+                              )}
+                            </td>
+                            {segundaVentanillaActiva && (
+                              <td style={{ textAlign: 'center' }}>
+                                <span style={{
+                                  display: 'inline-block',
+                                  padding: '0.5rem 1rem',
+                                  background: colorVentanilla,
+                                  color: 'white',
+                                  borderRadius: '8px',
+                                  fontWeight: '700',
+                                  fontSize: '0.9rem'
+                                }}>
+                                  VENTANILLA {ventanilla}
+                                </span>
+                              </td>
                             )}
-                          </td>
-                        </tr>
-                      ))}
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
