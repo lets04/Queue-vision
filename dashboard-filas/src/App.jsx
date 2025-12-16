@@ -1,4 +1,3 @@
-// VISTA CLIENTE 
 import React, { useState, useEffect } from 'react';
 import AdminPanel from './components/AdminPanel';
 import './App.css';
@@ -13,7 +12,6 @@ const CAMARAS_FIJAS = [
 ];
 
 // COMPONENTE: VISTA DE CÁMARA
-
 const CameraView = ({ cameraId, title }) => {
   const [cameraOnline, setCameraOnline] = useState(false);
   const [imageKey, setImageKey] = useState(() => Date.now());
@@ -53,7 +51,6 @@ const CameraView = ({ cameraId, title }) => {
 };
 
 // COMPONENTE PRINCIPAL: VISTA CLIENTE
-
 function App() {
   const [setDatos] = useState({
     personas: 0,
@@ -69,13 +66,13 @@ function App() {
   const [conectado, setConectado] = useState(false);
   const [config, setConfig] = useState({
     hora_apertura: "09:00",
-    hora_cierre: "17:00"
+    hora_cierre: "17:00",
+    segunda_ventanilla_activa: false,
+    persona_corte_segunda_ventanilla: 0
   });
   const [estimado, setEstimado] = useState({});
   const [mostrarAdmin, setMostrarAdmin] = useState(false);
   const [ranking, setRanking] = useState([]);
-  const [segundaVentanillaActiva, setSegundaVentanillaActiva] = useState(false);
-  const [personaCorte, setPersonaCorte] = useState(0);
 
   // Obtener datos
   useEffect(() => {
@@ -102,16 +99,15 @@ function App() {
       try {
         const response = await fetch(`${API_URL}/config`);
         const data = await response.json();
-        setConfig(data.config || { hora_apertura: "09:00", hora_cierre: "17:00" });
+        setConfig({
+          hora_apertura: data.config?.hora_apertura || "09:00",
+          hora_cierre: data.config?.hora_cierre || "17:00",
+          segunda_ventanilla_activa: data.config?.segunda_ventanilla_activa || false,
+          persona_corte_segunda_ventanilla: data.config?.persona_corte_segunda_ventanilla || 0
+        });
         setEstimado(data.estimado || {});
-        
-        // Actualizar estado de segunda ventanilla
-        if (data.config) {
-          setSegundaVentanillaActiva(data.config.segunda_ventanilla_activa || false);
-          setPersonaCorte(data.config.persona_corte_segunda_ventanilla || 0);
-        }
       } catch (error) {
-        console.error('Error al obtener configuración:', error);
+        console.error('Error al obtener configuracion:', error);
       }
     };
     fetchConfig();
@@ -134,6 +130,8 @@ function App() {
     const interval = setInterval(fetchRanking, 2000);
     return () => clearInterval(interval);
   }, []);
+
+  const personaDesdeSegundaVentanilla = config.persona_corte_segunda_ventanilla + 1;
 
   return (
     <>
@@ -167,8 +165,8 @@ function App() {
         {/* Contenido Principal */}
         <main className="main-content">
           
-          {/* Notificación Segunda Ventanilla */}
-          {segundaVentanillaActiva && (
+          {/* Notificación cuando se activa la Segunda Ventanilla */}
+          {config.segunda_ventanilla_activa && (
             <section style={{
               background: 'linear-gradient(135deg, rgba(34,197,94,0.15) 0%, rgba(16,185,129,0.15) 100%)',
               border: '2px solid #22c55e',
@@ -184,25 +182,92 @@ function App() {
                 }
               `}</style>
               <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: '3rem', marginBottom: '1rem', color: '#22c55e' }}>●</div>
+                <div style={{ fontSize: '3rem', marginBottom: '1rem', color: '#22c55e' }}></div>
                 <h2 style={{ color: '#22c55e', fontSize: '2rem', fontWeight: '700', marginBottom: '1rem' }}>
                   SEGUNDA VENTANILLA HABILITADA
                 </h2>
-                <p style={{ color: '#fff', fontSize: '1.3rem', marginBottom: '0.5rem' }}>
-                  Personas 1 a {personaCorte} → <strong style={{ color: '#3b82f6' }}>VENTANILLA 1</strong>
-                </p>
-                <p style={{ color: '#fff', fontSize: '1.3rem' }}>
-                  Desde persona #{personaCorte + 1} → <strong style={{ color: '#22c55e' }}>VENTANILLA 2</strong>
-                </p>
+                <div style={{ 
+                  background: 'rgba(255,255,255,0.1)', 
+                  borderRadius: '12px', 
+                  padding: '1.5rem', 
+                  marginTop: '1rem',
+                  border: '1px solid rgba(255,255,255,0.2)'
+                }}>
+                  <p style={{ color: '#fff', fontSize: '1.4rem', marginBottom: '1rem', fontWeight: '600' }}>
+                      Distribución de Atención:
+                  </p>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: '3rem', flexWrap: 'wrap' }}>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ 
+                        background: '#3b82f6', 
+                        color: 'white', 
+                        padding: '1rem 2rem', 
+                        borderRadius: '10px',
+                        fontWeight: '700',
+                        fontSize: '1.2rem',
+                        marginBottom: '0.5rem'
+                      }}>
+                        VENTANILLA 1
+                      </div>
+                      <p style={{ color: '#d1d5db', fontSize: '1.1rem' }}>
+                        Personas <strong>1 a {config.persona_corte_segunda_ventanilla}</strong>
+                      </p>
+                    </div>
+                    
+                    <div style={{ 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      fontSize: '2rem',
+                      color: '#6b7280'
+                    }}>
+                      →
+                    </div>
+                    
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ 
+                        background: '#22c55e', 
+                        color: 'white', 
+                        padding: '1rem 2rem', 
+                        borderRadius: '10px',
+                        fontWeight: '700',
+                        fontSize: '1.2rem',
+                        marginBottom: '0.5rem',
+                        animation: 'glow 2s ease-in-out infinite'
+                      }}>
+                        VENTANILLA 2
+                      </div>
+                      <p style={{ color: '#d1d5db', fontSize: '1.1rem' }}>
+                        Desde persona <strong>#{personaDesdeSegundaVentanilla}</strong> en adelante
+                      </p>
+                    </div>
+                  </div>
+                  
+                  <style>{`
+                    @keyframes glow {
+                      0%, 100% { box-shadow: 0 0 10px rgba(34,197,94,0.5); }
+                      50% { box-shadow: 0 0 20px rgba(34,197,94,0.8); }
+                    }
+                  `}</style>
+                  
+                  <div style={{ 
+                    marginTop: '1.5rem', 
+                    padding: '1rem', 
+                    background: 'rgba(34,197,94,0.2)',
+                    borderRadius: '8px',
+                    border: '1px solid #22c55e'
+                  }}>
+                    <p style={{ color: '#22c55e', fontSize: '1rem', fontWeight: '600', margin: 0 }}>
+                        Persona #{personaDesdeSegundaVentanilla} y posterior, dirijase a la VENTANILLA 2
+                    </p>
+                  </div>
+                </div>
               </div>
             </section>
           )}
 
-          {/* Métricas Principales */}
-
-          {/* 2 Cámaras Fijas */}
+          {/* 2 Camaras Fijas */}
           <section className="cameras-section">
-            <h2 className="section-title">Cámaras en Tiempo Real</h2>
+            <h2 className="section-title">Camaras en Tiempo Real</h2>
             <div className="cameras-grid">
               {CAMARAS_FIJAS.map((cam) => (
                 <CameraView
@@ -215,71 +280,103 @@ function App() {
           </section>
 
           {/* Personas en Fila */}
+
           <section className="queue-section">
             <div className="ranking-section">
               <h3 className="ranking-title">Personas en Fila - Tiempo de Espera</h3>
-              {ranking.length > 0 ? (
-                <div className="ranking-table">
-                  <table>
+                {ranking.length > 0 ? (
+                  <div className="ranking-table">
+                    <table>
                     <thead>
-                      <tr>
-                        <th>Posición</th>
-                        <th>ID</th>
-                        <th>Tiempo Espera</th>
-                        <th>Estado</th>
-                        {segundaVentanillaActiva && <th>Ventanilla</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ranking.map((persona) => {
-                        const posicion = persona.posicion + 1;
-                        const ventanilla = posicion <= personaCorte ? 1 : 2;
-                        const colorVentanilla = ventanilla === 1 ? '#3b82f6' : '#22c55e';
-                        
-                        return (
-                          <tr key={persona.id} className={`rank-${persona.posicion}`}>
-                            <td className="posicion">#{posicion}</td>
-                            <td className="id">ID: {persona.id}</td>
-                            <td className="tiempo">
-                              <span className="tiempo-badge">{persona.tiempo_espera_min} min</span>
-                            </td>
-                            <td className="estado">
-                              {persona.posicion === 0 ? (
-                                <span className="badge badge-atencion">SIENDO ATENDIDO</span>
-                              ) : (
-                                <span className="badge badge-espera">EN ESPERA</span>
-                              )}
-                            </td>
-                            {segundaVentanillaActiva && (
-                              <td style={{ textAlign: 'center' }}>
-                                <span style={{
-                                  display: 'inline-block',
-                                  padding: '0.5rem 1rem',
-                                  background: colorVentanilla,
-                                  color: 'white',
-                                  borderRadius: '8px',
-                                  fontWeight: '700',
-                                  fontSize: '0.9rem'
-                                }}>
-                                  VENTANILLA {ventanilla}
-                                </span>
-                              </td>
-                            )}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="no-ranking"><p>No hay personas en la fila</p></div>
-              )}
-            </div>
-          </section>
+            <tr>
+              <th>Posición Global</th>
+              <th>Cámara</th>
+              <th>Tiempo Espera</th>
+              <th>Estado</th>
+              {config.segunda_ventanilla_activa && <th>Ventanilla Asignada</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {ranking.map((persona) => {
+              const posicionGlobal = persona.posicion;
+              
+              const esInterior = persona.camera_id === 'cam_interior' || persona.segmento === 1;
+              const nombreCamara = esInterior ? 'Interior' : 'Exterior';
+              const colorCamara = esInterior ? '#22c55e' : '#3b82f6';  
+              
+              const ventanillaAsignada = config.segunda_ventanilla_activa
+                ? (posicionGlobal <= config.persona_corte_segunda_ventanilla ? 1 : 2)
+                : 1;
+              
+              return (
+                <tr key={persona.id} className={`rank-${posicionGlobal}`}>
+                  <td className="posicion">
+                    <span style={{
+                      fontSize: '1.5rem',
+                      fontWeight: '700',
+                      color: '#fff'
+                    }}>
+                      #{posicionGlobal}
+                    </span>
+                  </td>
+                  
+                  {/*  Cámara  */}
+                  <td style={{ textAlign: 'left', paddingRight: '2rem' }}> 
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '0.5rem 1rem',
+                      background: colorCamara,
+                      color: 'white',
+                      borderRadius: '8px',
+                      fontWeight: '600',
+                      fontSize: '0.9rem'
+                    }}>
+                        {nombreCamara}
+                    </span>
+                  </td>
+                  
+                  <td className="tiempo">
+                    <span className="tiempo-badge">{persona.tiempo_espera_min} min</span>
+                  </td>
+                  
+                  <td className="estado">
+                    {posicionGlobal === 1 ? (
+                      <span className="badge badge-atencion">SIENDO ATENDIDO</span>
+                    ) : (
+                      <span className="badge badge-espera">EN ESPERA</span>
+                    )}
+                  </td>
+                  
+                  {config.segunda_ventanilla_activa && (
+                    <td style={{ textAlign: 'center' }}>
+                      <span style={{
+                        display: 'inline-block',
+                        padding: '0.5rem 1rem',
+                        background: ventanillaAsignada === 1 ? '#3b82f6' : '#22c55e',
+                        color: 'white',
+                        borderRadius: '8px',
+                        fontWeight: '700',
+                        fontSize: '0.9rem'
+                      }}>
+                        VENTANILLA {ventanillaAsignada}
+                      </span>
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+              </tbody>
+            </table>
+          </div>
+          ) : (
+            <div className="no-ranking"><p>No hay personas en la fila</p></div>
+            )}
+          </div>
+        </section>
 
-          {/* Horario de Atención */}
+          {/* Horario de Atencion */}
           <section className="schedule-section">
-            <h2 className="section-title">Horario de Atención</h2>
+            <h2 className="section-title">Horario de Atencion</h2>
             <div className="schedule-card">
               <div className="schedule-content">
                 <div className="schedule-item">
@@ -304,7 +401,7 @@ function App() {
 
         {/* Footer */}
         <footer className="footer">
-          <p>Sistema de Visión Artificial con YOLO</p>
+          <p>Sistema de Vision Artificial con YOLO</p>
         </footer>
       </div>
 
