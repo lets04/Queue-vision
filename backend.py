@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 import uvicorn
 from collections import defaultdict
+import math
 
 app = FastAPI()
 
@@ -211,6 +212,7 @@ async def obtener_estado():
 
 @app.get("/fila-completa")
 async def obtener_fila_completa():
+
     ahora = time.time()
     segmentos_activos = {}
     
@@ -219,24 +221,34 @@ async def obtener_fila_completa():
             segmentos_activos[seg_num] = datos
     
     fila_global = []
-    offset = 0
+    posicion_global = 1  # ← Empieza en 1
     
+    # Procesar segmentos en orden 
     for seg_num in sorted(segmentos_activos.keys()):
         datos = segmentos_activos[seg_num]
+        
+        # Procesar cada persona del segmento
         for persona in datos['personas']:
-            posicion_global = offset + persona['local_pos']
             fila_global.append({
-                'id': posicion_global,
-                'posicion': posicion_global - 1,
+                'id': posicion_global,  
+                'posicion': posicion_global,  
                 'segmento': seg_num,
                 'camera_id': datos['camera_id'],
-                'tiempo_espera_min': (posicion_global - 1) * configuracion['tiempo_atencion_min'],
-                'confianza': persona.get('confianza', 1.0)
+                'local_pos': persona['local_pos'],
+                'tiempo_espera_min': (posicion_global - 1) * configuracion['tiempo_atencion_min'],  
+                'confianza': persona.get('confianza', 1.0),
+                'centro_y': persona.get('centro_y', 0)
             })
-        offset += datos['personas_count']
+            posicion_global += 1  
     
-    return {"total": len(fila_global), "personas": fila_global}
-
+    return {
+        "total": len(fila_global),
+        "personas": fila_global,
+        "segmentos": {
+            str(seg): len([p for p in fila_global if p['segmento'] == seg])
+            for seg in segmentos_activos.keys()
+        }
+    }
 
 @app.get("/segmentos")
 async def listar_segmentos():
@@ -414,8 +426,12 @@ async def obtener_config():
     
     tiempo_por_persona = configuracion['tiempo_atencion_min']
     personas_en_cola = estado['personas']
-    personas_estimadas = int(minutos_hasta_cierre / tiempo_por_persona) if tiempo_por_persona > 0 else 0
-    
+    personas_estimadas = (
+    math.ceil(minutos_hasta_cierre / tiempo_por_persona)
+    if tiempo_por_persona > 0
+    else 0
+    )
+
     # Calcular si hay alerta
     alerta_nueva_ventanilla = personas_estimadas < personas_en_cola
 
@@ -572,7 +588,7 @@ async def resetear_estadisticas():
     _segmentos.clear()
     _personas_historico.clear()
     
-    await _log_async("✓ Estadísticas reseteadas")
+    await _log_async("Estadísticas reseteadas")
     return {"status": "ok"}
 
 
