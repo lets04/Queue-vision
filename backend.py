@@ -99,13 +99,22 @@ async def recibir_segmento(datos: DatosSegmento):
     
     asyncio.create_task(_actualizar_tracking_personas())
     
+    # Calcular offset para numeración global
+    ahora = time.time()
+    segmentos_ordenados = sorted([s for s in _segmentos.keys() if ahora - _segmentos[s].get('last_update', 0) < 10])
+    offset = 0
+    for s in segmentos_ordenados:
+        if s == datos.segmento:
+            break
+        offset += _segmentos[s]['personas_count']
+    
     # Print asíncrono 
     asyncio.create_task(_log_async(
-        f"Segmento {datos.segmento} ({datos.camera_id}): {datos.personas_count} personas"
+        f"Segmento {datos.segmento} ({datos.camera_id}): {datos.personas_count} personas, offset={offset}"
     ))
     
-    # Response inmediata 
-    return Response(status_code=202)
+    # Devolver offset para numeración global
+    return {"offset": offset}
 
 
 @app.post("/actualizar-fila")
@@ -234,7 +243,7 @@ async def obtener_fila_completa():
                 'posicion': posicion_global,  
                 'segmento': seg_num,
                 'camera_id': datos['camera_id'],
-                'local_pos': persona['local_pos'],
+                'local_pos': posicion_global,  # Cambiado para enumeración continua global
                 'tiempo_espera_min': (posicion_global - 1) * configuracion['tiempo_atencion_min'],  
                 'confianza': persona.get('confianza', 1.0),
                 'centro_y': persona.get('centro_y', 0)

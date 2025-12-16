@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import AdminPanel from './components/AdminPanel';
 import './App.css';
 
-const API_URL = 'http://192.168.0.17:8000';
+const API_URL = 'http://192.168.0.5:8000';
 const UPDATE_INTERVAL = 1000;
 
 // 2 CÁMARAS FIJAS

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-const API_URL = 'http://192.168.0.9:8000';
+const API_URL = 'http://192.168.0.5:8000';
 
 // Iconos SVG
 const Icons = {

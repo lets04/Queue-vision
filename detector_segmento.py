@@ -13,10 +13,21 @@ import torch
 
 # CONFIGURACIÓN
 
-URL_BACKEND = "http://127.0.0.1:8000"
+URL_BACKEND = "http://192.168.0.5:8000"
 INTERVALO_ENVIO = 2
 INTERVALO_FRAME = 5  
-MAX_INTENTOS_ENVIO = 1  
+MAX_INTENTOS_ENVIO = 1
+PUNTO_ATENCION = (640, 720)  # Punto de atención (centro inferior)  
+# Punto inicial (persona #1 / ventanilla)
+ORIGEN_FILA = (720, 700)
+
+# Dirección de la fila (diagonal hacia atrás)
+DIRECCION_FILA = (-1, -1)
+
+# Normalizar dirección
+norm = math.sqrt(DIRECCION_FILA[0]**2 + DIRECCION_FILA[1]**2)
+DIRECCION_FILA = (DIRECCION_FILA[0]/norm, DIRECCION_FILA[1]/norm)
+
 
 print("Cargando modelo YOLOv8s...")
 model = YOLO('yolov8s.pt')
@@ -85,11 +96,14 @@ parser.add_argument('--aspect-max', type=float, default=5.0,
 
 args = parser.parse_args()
 
+# Offset global para numeración continua
+global_offset = 0
+
 # CONFIGURACIÓN DE CÁMARA
 
 camera_id = args.camera_id
 segmento = args.segmento
-url_camara = args.camera_url or os.getenv('CAMERA_URL') or "http://10.188.219.225:8080/video"
+url_camara = args.camera_url or os.getenv('CAMERA_URL') or "http://192.168.0.4:8080/video"
 
 # ZONA DE FILA
 
@@ -306,22 +320,35 @@ class TrackerSegmento:
                 del d[oid]
     
     def obtener_personas_ordenadas(self, zona_polygon):
-        """Obtener personas en la zona ordenadas por Y"""
+   
         personas = []
+
         for oid, centro in self.objects.items():
             if zona_polygon.contains(Point(centro[0], centro[1])):
+
+                # Vector desde origen de la fila
+                vx = centro[0] - ORIGEN_FILA[0]
+                vy = centro[1] - ORIGEN_FILA[1]
+
+                # Proyección escalar sobre la dirección de la fila
+                proyeccion = vx * DIRECCION_FILA[0] + vy * DIRECCION_FILA[1]
+
                 personas.append({
                     'local_id': oid,
                     'centro': centro,
                     'centro_x': centro[0],
                     'centro_y': centro[1],
+                    'proyeccion': proyeccion,
                     'bbox': self.bboxes.get(oid),
                     'confianza': self.confianzas.get(oid, 0.0)
                 })
-        
-        # Ordenar por Y 
-        personas.sort(key=lambda x: x['centro_y'])
+
+        #ORDEN REAL DE FILA
+        personas.sort(key=lambda x: x['proyeccion'])
+
         return personas
+
+
 
 
 # Inicializar tracker
@@ -353,17 +380,19 @@ envios_pendientes = 0
 MAX_ENVIOS_PENDIENTES = 2  
 
 def enviar_datos_segmento(datos):
-    """Enviar datos de este segmento al backend (optimizado)"""
+    """Enviar datos de este segmento al backend y obtener offset para numeración global"""
     global envios_pendientes
     try:
         envios_pendientes += 1
         url = f"{URL_BACKEND}/segmento-fila"
         response = requests.post(url, json=datos, timeout=0.5) 
         response.raise_for_status()
+        data = response.json()
+        return data.get('offset', 0)
     except requests.exceptions.Timeout:
-        pass  
+        return 0
     except Exception as e:
-        pass 
+        return 0
     finally:
         envios_pendientes = max(0, envios_pendientes - 1)
 
@@ -554,7 +583,7 @@ while True:
         bbox = persona['bbox']
         conf = persona['confianza']
         
-        num_local = idx + 1
+        num_local = idx + 1 + global_offset
         
         # Color según confianza
         if conf > 0.75:
@@ -666,7 +695,8 @@ while True:
                 "timestamp": tiempo_actual
             }
             
-            threading.Thread(target=enviar_datos_segmento, args=(datos,), daemon=True).start()
+            offset = enviar_datos_segmento(datos)
+            global_offset = offset
             ultimo_envio_datos = tiempo_actual
     
     # ENVIAR FRAME 
