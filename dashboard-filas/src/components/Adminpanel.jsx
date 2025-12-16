@@ -26,6 +26,12 @@ const Icons = {
       <line x1="18" y1="6" x2="6" y2="18"></line>
       <line x1="6" y1="6" x2="18" y2="18"></line>
     </svg>
+  ),
+  Plus: () => (
+    <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19"></line>
+      <line x1="5" y1="12" x2="19" y2="12"></line>
+    </svg>
   )
 };
 
@@ -49,13 +55,13 @@ function AdminPanel({ onClose }) {
   const [estadisticas, setEstadisticas] = useState({});
   const [camaraCounts, setCamaraCounts] = useState({ interior: 0, exterior: 0 });
   const [notificacionesHabilitadas, setNotificacionesHabilitadas] = useState(false);
-  const [setMostrarDialogoVentanilla] = useState(false);
+  const [alertaRechazadaManual, setAlertaRechazadaManual] = useState(false);
   const lastAlertRef = useRef(false);
-  const mostrarDialogoVentanilla =
-  notificacionesHabilitadas &&
-  !!estimado?.alerta_nueva_ventanilla &&
-  !!estimado?.alerta_pendiente;
+  const lastAlertStateRef = useRef(false);
 
+  // Estado de alerta rechazada 
+  const alertaActiva = !!estimado?.alerta_nueva_ventanilla;
+  const alertaRechazada = alertaActiva && alertaRechazadaManual;
 
   useEffect(() => {
     const solicitarPermisoNotificaciones = async () => {
@@ -142,41 +148,56 @@ function AdminPanel({ onClose }) {
     return () => clearInterval(interval);
   }, []);
 
+  // Notificacion del navegador cuando hay alerta
   useEffect(() => {
-  if (
-    notificacionesHabilitadas &&
-    !!estimado?.alerta_nueva_ventanilla &&
-    !lastAlertRef.current
-  ) {
-    new Notification('ALERTA: Abrir ventanilla', {
-      body: `${estimado.personas_en_cola || 0} personas en cola`,
-      tag: 'alerta-ventanilla',
-      requireInteraction: true
-    });
+    if (
+      notificacionesHabilitadas &&
+      alertaActiva &&
+      !lastAlertRef.current
+    ) {
+      new Notification(' ALERTA: Abrir ventanilla', {
+        body: `${estimado.personas_en_cola || 0} personas en cola. Capacidad insuficiente.`,
+        tag: 'alerta-ventanilla',
+        requireInteraction: true
+      });
 
-    try {
-      const audio = new Audio('data:audio/wav;base64,...');
-      audio.play().catch(() => {});
-    } catch(error) {
-      console.error(error);
+      try {
+        const audio = new Audio('data:audio/wav;base64,...');
+        audio.play().catch(() => {});
+      } catch(error) {
+        console.error(error);
+      }
+
+      lastAlertRef.current = true;
     }
 
-    lastAlertRef.current = true;
-  }
+    if (!alertaActiva) {
+      lastAlertRef.current = false;
+    }
+  }, [alertaActiva, estimado.personas_en_cola, notificacionesHabilitadas]);
 
-  if (!estimado?.alerta_nueva_ventanilla) {
-    lastAlertRef.current = false;
-  }
-}, [estimado, notificacionesHabilitadas]);
+  // Alerta desaparece
+  useEffect(() => {
+    if (!alertaActiva && lastAlertStateRef.current) {
+      lastAlertStateRef.current = false;  
+    }
+      lastAlertStateRef.current = alertaActiva;
+    }, [alertaActiva]);
+
 
   const handleActivarSegundaVentanilla = async (activar) => {
+    const personaCorte = estimado.personas_estimadas_atendidas || 0;
+    
     try {
       await fetch(`${API_URL}/config/segunda-ventanilla`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activar, persona_corte: estimado.persona_corte || 0 })
+        body: JSON.stringify({ activar, persona_corte: personaCorte })
       });
-      setMostrarDialogoVentanilla(false);
+      
+      if (!activar) {
+        setAlertaRechazadaManual(true); 
+      }
     } catch (error) {
       console.error('Error:', error);
     }
@@ -231,11 +252,11 @@ function AdminPanel({ onClose }) {
       <div style={{ maxWidth: '1600px', margin: '0 auto', background: '#0a0a0a', borderRadius: '24px', border: '1px solid #222' }}>
         <div style={{ padding: '2rem 3rem', borderBottom: '1px solid #222', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%)' }}>
           <div>
-            <h1 style={{ fontSize: '2rem', fontWeight: '700', color: '#fff', marginBottom: '0.5rem' }}>Panel de Administración</h1>
-            <p style={{ color: '#6b7280', fontSize: '0.9rem' }}>Sistema de Gestión de Filas en Tiempo Real</p>
+            <h1 style={{ fontSize: '2rem', fontWeight: '700', color: '#fff', marginBottom: '0.5rem' }}>Panel de Administracion</h1>
+            <p style={{ color: '#6b7280', fontSize: '0.9rem' }}>Sistema de Gestion de Filas en Tiempo Real</p>
             <div style={{ marginTop: '0.5rem' }}>
               <span style={{ fontSize: '0.75rem', color: notificacionesHabilitadas ? '#22c55e' : '#ef4444' }}>
-                {notificacionesHabilitadas ? 'Notificaciones: Activas' : 'Notificaciones: Desactivadas'}
+                {notificacionesHabilitadas ? '● Notificaciones: Activas' : '● Notificaciones: Desactivadas'}
               </span>
             </div>
           </div>
@@ -243,31 +264,110 @@ function AdminPanel({ onClose }) {
         </div>
 
         <div style={{ padding: '2rem 3rem' }}>
-          {estimado.alerta_nueva_ventanilla && (
-            <div style={{ background: 'linear-gradient(135deg, rgba(251,191,36,0.15) 0%, rgba(239,68,68,0.15) 100%)', border: '2px solid #fbbf24', borderRadius: '16px', padding: '1.5rem 2rem', marginBottom: '2rem', display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
-              <div style={{ fontSize: '3rem' }}>⚠</div>
-              <div style={{ flex: 1 }}>
-                <h3 style={{ color: '#fbbf24', fontSize: '1.2rem', marginBottom: '0.5rem', fontWeight: '700' }}>ALERTA: INSUFICIENCIA DE CAPACIDAD</h3>
-                <p style={{ color: '#fff', marginBottom: '0.5rem' }}>
-                  Se estiman <strong>{estimado.personas_estimadas_atendidas}</strong> personas atendidas, pero hay <strong>{estimado.personas_en_cola}</strong> en cola.
-                </p>
-                <div style={{ background: 'rgba(251,191,36,0.2)', padding: '0.5rem 1rem', borderRadius: '8px', color: '#fbbf24', fontWeight: '600', display: 'inline-block' }}>
-                  Se recomienda abrir ventanilla adicional
+          
+          {/* Alerta principal */}
+          {alertaActiva && !alertaRechazada && (
+            <div style={{ background: 'linear-gradient(135deg, rgba(251,191,36,0.15) 0%, rgba(239,68,68,0.15) 100%)', border: '2px solid #fbbf24', borderRadius: '16px', padding: '1.5rem 2rem', marginBottom: '2rem' }}>
+              <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
+                <div style={{ fontSize: '3rem' }}>⚠️</div>
+                <div style={{ flex: 1 }}>
+                  <h3 style={{ color: '#fbbf24', fontSize: '1.2rem', marginBottom: '0.5rem', fontWeight: '700' }}>
+                    ALERTA: INSUFICIENCIA DE CAPACIDAD
+                  </h3>
+                  <p style={{ color: '#fff', marginBottom: '0.5rem' }}>
+                    Se estiman <strong>{estimado.personas_estimadas_atendidas}</strong> personas atendidas, pero hay <strong>{estimado.personas_en_cola}</strong> en cola.
+                  </p>
+                  <div style={{ background: 'rgba(251,191,36,0.2)', padding: '0.5rem 1rem', borderRadius: '8px', color: '#fbbf24', fontWeight: '600', display: 'inline-block', marginBottom: '1rem' }}>
+                    ¿Desea abrir una segunda ventanilla?
+                  </div>
+                  
+                  {/* Botones Si/NO */}
+                  <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+                    <button 
+                      onClick={() => handleActivarSegundaVentanilla(true)}
+                      style={{ 
+                        padding: '0.75rem 2rem', 
+                        background: '#22c55e', 
+                        color: 'white', 
+                        border: 'none', 
+                        borderRadius: '10px', 
+                        cursor: 'pointer', 
+                        fontWeight: '600',
+                        fontSize: '1rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.5rem'
+                      }}
+                    >
+                      <Icons.Check /> SI, Abrir Segunda Ventanilla
+                    </button>
+                    <button 
+                      onClick={() => handleActivarSegundaVentanilla(false)}
+                      style={{ 
+                        padding: '0.75rem 2rem', 
+                        background: '#6b7280', 
+                        color: 'white', 
+                        border: 'none', 
+                        borderRadius: '10px', 
+                        cursor: 'pointer', 
+                        fontWeight: '600',
+                        fontSize: '1rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.5rem'
+                      }}
+                    >
+                      <Icons.X /> NO, Continuar con una
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           )}
 
-          {mostrarDialogoVentanilla && (
-            <div style={{ background: 'rgba(0,0,0,0.8)', position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000 }}>
-              <div style={{ background: '#1a1a1a', border: '2px solid #fbbf24', borderRadius: '16px', padding: '2rem', maxWidth: '500px', textAlign: 'center' }}>
-                <h3 style={{ color: '#fff', fontSize: '1.5rem', marginBottom: '1rem' }}>¿Abrir segunda ventanilla?</h3>
-                <p style={{ color: '#9ca3af', marginBottom: '2rem' }}>Se detectó alta demanda. ¿Desea activar una ventanilla adicional?</p>
-                <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                  <button onClick={() => handleActivarSegundaVentanilla(true)} style={{ padding: '0.75rem 2rem', background: '#22c55e', color: 'white', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: '600' }}>Sí, Activar</button>
-                  <button onClick={() => handleActivarSegundaVentanilla(false)} style={{ padding: '0.75rem 2rem', background: '#6b7280', color: 'white', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: '600' }}>No, Cancelar</button>
+          {/* Notificación sutil cuando se rechaza */}
+          {alertaRechazada && (
+            <div style={{ 
+              background: 'rgba(59,130,246,0.1)', 
+              border: '1px solid #3b82f6', 
+              borderRadius: '12px', 
+              padding: '1rem 1.5rem', 
+              marginBottom: '2rem',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <div style={{ fontSize: '1.5rem' }}></div>
+                <div>
+                  <p style={{ color: '#3b82f6', fontWeight: '600', margin: 0 }}>
+                    Recomendación: Considerar abrir segunda ventanilla
+                  </p>
+                  <p style={{ color: '#9ca3af', fontSize: '0.875rem', margin: '0.25rem 0 0 0' }}>
+                    La demanda continúa siendo alta. {estimado.personas_en_cola} personas esperando.
+                  </p>
                 </div>
               </div>
+              <button 
+                onClick={() => {
+                  setAlertaRechazadaManual(false);
+                  handleActivarSegundaVentanilla(true);
+                }}
+                style={{ 
+                  padding: '0.6rem 1.2rem', 
+                  background: '#3b82f6', 
+                  color: 'white', 
+                  border: 'none', 
+                  borderRadius: '8px', 
+                  cursor: 'pointer', 
+                  fontWeight: '600',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem'
+                }}
+              >
+                <Icons.Plus /> Abrir Ahora
+              </button>
             </div>
           )}
 
@@ -311,7 +411,7 @@ function AdminPanel({ onClose }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem', marginBottom: '2rem' }}>
             <div style={{ background: '#111', border: '1px solid #222', borderRadius: '16px', padding: '2rem' }}>
               <h2 style={{ color: '#fff', fontSize: '1.25rem', marginBottom: '1.5rem', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <Icons.Camera /> Monitoreo por Cámara
+                <Icons.Camera /> Monitoreo por Camara
               </h2>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 <StatusIndicator label="Cámara Interior" value={`${camaraCounts.interior} personas`} color="#22c55e" />
@@ -333,22 +433,22 @@ function AdminPanel({ onClose }) {
                 </div>
                 <div style={{ background: '#0a0a0a', padding: '1.5rem', borderRadius: '12px', textAlign: 'center' }}>
                   <div style={{ color: '#6b7280', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Tiempo de Espera</div>
-                  <div style={{ color: '#fff', fontSize: '2.5rem', fontWeight: '700', fontFamily: 'monospace' }}>{datos.tiempo_espera_min}</div>
+                  <div style={{ color: '#fff', fontSize: '2.5rem', fontWeight: '700', fontFamily: 'monospace' }}>{datos.tiempo_espera_min} min</div>
                 </div>
                 <div style={{ background: '#0a0a0a', padding: '1.5rem', borderRadius: '12px', textAlign: 'center' }}>
-                  <div style={{ color: '#6b7280', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Nivel de Ocupación</div>
-                  <div style={{ color: '#fff', fontSize: '2.5rem', fontWeight: '700', fontFamily: 'monospace' }}>{nivel.text}</div>
+                  <div style={{ color: '#6b7280', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Nivel Ocupacion</div>
+                  <div style={{ color: nivel.color, fontSize: '2rem', fontWeight: '700', fontFamily: 'monospace' }}>{nivel.text}</div>
                 </div>
               </div>
             </div>
           </div>
 
           <div style={{ background: '#111', border: '1px solid #222', borderRadius: '16px', padding: '2rem' }}>
-            <h2 style={{ color: '#fff', fontSize: '1.25rem', marginBottom: '1.5rem', fontWeight: '600' }}>Estadísticas de Atención</h2>
+            <h2 style={{ color: '#fff', fontSize: '1.25rem', marginBottom: '1.5rem', fontWeight: '600' }}>Estadisticas de Atencion</h2>
             {estadisticas.estado_ventanilla === 'ABIERTA' ? (
               <div style={{ textAlign: 'center', padding: '2rem', color: '#3b82f6' }}>
                 <p style={{ fontSize: '1.1rem', fontWeight: '600' }}>Ventanilla Abierta</p>
-                <small style={{ color: '#6b7280' }}>Estadísticas disponibles después del cierre</small>
+                <small style={{ color: '#6b7280' }}>Estadisticas disponibles después del cierre</small>
               </div>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1.5rem' }}>
@@ -356,8 +456,6 @@ function AdminPanel({ onClose }) {
                   { label: 'Personas Atendidas', value: estadisticas.personas_atendidas || 0 },
                   { label: 'Tiempo Promedio', value: `${Math.round(estadisticas.tiempo_promedio_espera || 0)} min` },
                   { label: 'Pico Máximo', value: `${estadisticas.pico_fila || 0} personas` },
-                  { label: 'Velocidad', value: `${estadisticas.velocidad_atencion || 0} p/h` },
-                  { label: 'Horas Operación', value: estadisticas.horas_operacion || 0 },
                   { label: 'Estado', value: estadisticas.estado_ventanilla || 'N/A' }
                 ].map((stat, idx) => (
                   <div key={idx} style={{ background: '#0a0a0a', padding: '1.5rem', borderRadius: '12px', textAlign: 'center' }}>
