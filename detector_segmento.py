@@ -70,8 +70,8 @@ parser.add_argument('--camera-id', type=str, required=True,
 parser.add_argument('--segmento', type=int, required=True,
                     help='Número de segmento (1=cerca, 2=medio, 3=lejos)')
 
-parser.add_argument('--umbral-confianza', type=float, default=0.35,
-                    help='Umbral de confianza YOLO (bajado para detectar personas parciales)')
+parser.add_argument('--umbral-confianza', type=float, default=0.20,
+                    help='Umbral de confianza YOLO')
 
 parser.add_argument('--distancia-fusion', type=int, default=80,
                     help='Distancia para fusionar detecciones')
@@ -126,11 +126,10 @@ else:
 zona_fila = Polygon(puntos_zona_fila)
 zona_fila_dibujo = np.array(puntos_zona_fila, np.int32).reshape((-1, 1, 2))
 
-# TRACKER MEJORADO CON PREDICCIÓN
+# TRACKER
 
 class TrackerSegmento:
     """Tracker avanzado con predicción de movimiento"""
-    
     def __init__(self, distancia_fusion=80, distancia_max=100, max_disappeared=45):
         self.distancia_fusion = distancia_fusion
         self.distancia_max = distancia_max

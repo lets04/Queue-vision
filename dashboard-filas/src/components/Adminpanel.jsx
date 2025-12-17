@@ -56,6 +56,7 @@ function AdminPanel({ onClose }) {
   const [camaraCounts, setCamaraCounts] = useState({ interior: 0, exterior: 0 });
   const [notificacionesHabilitadas, setNotificacionesHabilitadas] = useState(false);
   const [alertaRechazadaManual, setAlertaRechazadaManual] = useState(false);
+  const [alertaVisible, setAlertaVisible] = useState(true);
   const lastAlertRef = useRef(false);
   const lastAlertStateRef = useRef(false);
 
@@ -197,6 +198,8 @@ function AdminPanel({ onClose }) {
       
       if (!activar) {
         setAlertaRechazadaManual(true); 
+      } else {
+        setAlertaVisible(false);  // Ocultar la alerta al aceptar
       }
     } catch (error) {
       console.error('Error:', error);
@@ -266,7 +269,7 @@ function AdminPanel({ onClose }) {
         <div style={{ padding: '2rem 3rem' }}>
           
           {/* Alerta principal */}
-          {alertaActiva && !alertaRechazada && (
+          {alertaActiva && !alertaRechazada && alertaVisible && (
             <div style={{ background: 'linear-gradient(135deg, rgba(251,191,36,0.15) 0%, rgba(239,68,68,0.15) 100%)', border: '2px solid #fbbf24', borderRadius: '16px', padding: '1.5rem 2rem', marginBottom: '2rem' }}>
               <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
                 <div style={{ fontSize: '3rem' }}>⚠️</div>
@@ -275,7 +278,7 @@ function AdminPanel({ onClose }) {
                     ALERTA: INSUFICIENCIA DE CAPACIDAD
                   </h3>
                   <p style={{ color: '#fff', marginBottom: '0.5rem' }}>
-                    Se estiman <strong>{estimado.personas_estimadas_atendidas}</strong> personas atendidas, pero hay <strong>{estimado.personas_en_cola}</strong> en cola.
+                    Se estiman <strong>{estimado.personas_estimadas_atendidas}</strong> personas atendidas, pero hay <strong>{estimado.personas_en_cola}</strong> en cola. Por lo tanto, desde la persona <strong>#{estimado.personas_estimadas_atendidas + 1}</strong> en adelante deben dirigirse a una segunda ventanilla.
                   </p>
                   <div style={{ background: 'rgba(251,191,36,0.2)', padding: '0.5rem 1rem', borderRadius: '8px', color: '#fbbf24', fontWeight: '600', display: 'inline-block', marginBottom: '1rem' }}>
                     ¿Desea abrir una segunda ventanilla?

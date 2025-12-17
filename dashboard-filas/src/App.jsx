@@ -166,7 +166,7 @@ function App() {
         <main className="main-content">
           
           {/* Notificación cuando se activa la Segunda Ventanilla */}
-          {config.segunda_ventanilla_activa && (
+          {config.segunda_ventanilla_activa && estimado.personas_en_cola > estimado.personas_estimadas_atendidas && (
             <section style={{
               background: 'linear-gradient(135deg, rgba(34,197,94,0.15) 0%, rgba(16,185,129,0.15) 100%)',
               border: '2px solid #22c55e',
